@@ -1768,7 +1768,7 @@ class PupilBridge:
     ) -> None:
         """Send an event to the player's device, encoding payload as JSON suffix."""
 
-        event_payload = dict(payload or {})
+        event_payload = self._normalise_event_payload(payload)
         event_priority: Literal["high", "normal"] = (
             "high" if priority == "high" else "normal"
         )

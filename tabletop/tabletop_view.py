@@ -84,6 +84,17 @@ ALLOWED_EVENT_KEYS = {
 }
 
 
+class _PreBlockSyncGuard:
+    def __init__(self) -> None:
+        self._synced_for_block: Optional[int] = None
+
+    def should_sync_for(self, block_index: Optional[int]) -> bool:
+        return block_index is not None and block_index != self._synced_for_block
+
+    def mark_done(self, block_index: Optional[int]) -> None:
+        self._synced_for_block = block_index
+
+
 class _AsyncMarkerBridge:
     def __init__(self, owner: "TabletopRoot") -> None:
         self._owner = owner
@@ -243,12 +254,7 @@ class TabletopRoot(FloatLayout):
         self._next_bridge_check = 0.0
         self._bridge_check_interval = 0.3
         self._time_reconciler: Optional[Any] = None
-        self._heartbeat_event: Optional[Any] = None
-        self._heartbeat_interval = 30.0
-        self._heartbeat_jitter = 5.0
-        self._heartbeat_label = "sync.heartbeat"
-        self._heartbeat_counter = 0
-        self._origin_device_id = "host_ui"
+        self._pre_block_sync = _PreBlockSyncGuard()
         self.update_bridge_context(
             bridge=bridge,
             player=bridge_player,
@@ -397,6 +403,12 @@ class TabletopRoot(FloatLayout):
         current_block = self._current_bridge_block_index()
         if current_block is not None:
             self._bridge_block = current_block
+            try:
+                round_in_block = int(self.round_in_block or 0)
+            except Exception:
+                round_in_block = 0
+            if round_in_block > 1:
+                self._pre_block_sync.mark_done(current_block)
 
         session_value = self._bridge_session
         block_value = self._bridge_block
@@ -480,33 +492,46 @@ class TabletopRoot(FloatLayout):
     def _ensure_time_reconciler(self) -> None:
         self._time_reconciler = None
 
-    def _cancel_sync_heartbeat(self) -> None:
-        event = self._heartbeat_event
-        if event is None:
-            return
-        cancel = getattr(event, "cancel", None)
-        if callable(cancel):
-            try:
-                cancel()
-            except Exception:
-                log.debug("Abbruch des Sync-Heartbeats fehlgeschlagen", exc_info=True)
-        self._heartbeat_event = None
-
-    def _schedule_sync_heartbeat(self, *, immediate: bool = False) -> None:
-        self._cancel_sync_heartbeat()
-
-    def _emit_sync_heartbeat(self, _dt: float) -> None:
-        return
-
     def shutdown_sync_services(self) -> None:
-        self._cancel_sync_heartbeat()
         reconciler = self._time_reconciler
         if reconciler is not None:
             try:
                 reconciler.stop()
             except Exception:
                 log.debug("Stoppen des TimeReconciler fehlgeschlagen", exc_info=True)
-            self._time_reconciler = None
+        self._time_reconciler = None
+
+    def _emit_pre_block_sync_once(self, upcoming_block: Optional[int]) -> None:
+        if not self._bridge:
+            if upcoming_block is not None:
+                self._pre_block_sync.mark_done(upcoming_block)
+            return
+        if not self._pre_block_sync.should_sync_for(upcoming_block):
+            return
+        players = self._bridge_ready_players()
+        bridge_ref = self._bridge
+        if not players or not bridge_ref:
+            self._pre_block_sync.mark_done(upcoming_block)
+            return
+        base = self._bridge_payload_base(player=None)
+        allowed = {"session", "block", "player"}
+        for player in players:
+            payload = {
+                "session": base.get("session"),
+                "block": upcoming_block,
+                "player": player,
+            }
+            payload = {k: v for k, v in payload.items() if k in allowed}
+            try:
+                bridge_ref.send_event(
+                    "sync.block.pre",
+                    player,
+                    payload,
+                    priority="low",
+                )
+            except Exception:
+                log.exception("Pre-block sync dispatch failed for %s", player)
+        self._pre_block_sync.mark_done(upcoming_block)
 
     def send_bridge_event(
         self, name: str, payload: Optional[Dict[str, Any]] = None
@@ -645,7 +670,6 @@ class TabletopRoot(FloatLayout):
         self.session_storage_id = safe_session_id
         self.logger = self.events_factory(self.session_id, str(db_path))
         self._ensure_time_reconciler()
-        self._schedule_sync_heartbeat(immediate=True)
         init_round_log(self)
         self.update_role_assignments()
 
@@ -1336,6 +1360,19 @@ class TabletopRoot(FloatLayout):
 
     def setup_round(self):
         result = self.controller.setup_round()
+        block_index = self._current_bridge_block_index()
+        if block_index is None:
+            try:
+                block_index = int(self._bridge_block) if self._bridge_block is not None else None
+            except (TypeError, ValueError):
+                block_index = None
+        try:
+            round_in_block = int(self.round_in_block or 0)
+        except Exception:
+            round_in_block = 0
+        if block_index is not None and round_in_block > 1:
+            self._pre_block_sync.mark_done(block_index)
+        self._emit_pre_block_sync_once(block_index)
         self._apply_round_setup(result)
 
     def _apply_round_setup(self, result):
@@ -1747,19 +1784,6 @@ class TabletopRoot(FloatLayout):
             payload
         )
         write_round_log(self, actor, action, payload, player)
-        ALLOWED = {
-            "session",
-            "block",
-            "player",
-            "button",
-            "phase",
-            "round_index",
-            "game_player",
-            "player_role",
-            "accepted",
-            "decision",
-            "actor",
-        }
         base = self._bridge_payload_base(player=None)
         cloud_event = {k: base[k] for k in ("session", "block", "player") if k in base}
         cloud_event.update({
@@ -1774,7 +1798,9 @@ class TabletopRoot(FloatLayout):
         for k in ("button", "phase", "accepted", "decision"):
             if k in payload:
                 cloud_event[k] = payload[k]
-        cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED}
+        cloud_event = {
+            k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS
+        }
         push_async(cloud_event)
         if self.marker_bridge and action != 'round_start':
             # non-blocking: moved bridge send to async enqueue
@@ -1893,6 +1919,8 @@ class TabletopRoot(FloatLayout):
             self.blocks = []
             self.apply_phase()
             return
+
+        self._pre_block_sync.mark_done(None)
 
         start_index = max(0, min(len(available_blocks) - 1, self.start_block - 1))
         selected_blocks = available_blocks[start_index:]

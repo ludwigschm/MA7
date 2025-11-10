@@ -9,23 +9,17 @@ sounddevice
 
 pip install kivy pandas numpy opencv-contrib-python sounddevice
 
-## Event-Zeitmodell & Refinement
+## Event-Synchronisation
 
-Die Tabletop-App vergibt jetzt für jedes UI-Ereignis sofort eine eindeutige
-`event_id` sowie einen hochauflösenden Zeitstempel (`t_local_ns`) auf Basis von
-`time.perf_counter_ns()`. Diese Metadaten werden zusammen mit
-`mapping_version`, `origin_device` und `provisional=True` an beide Pupil-Brillen
-geschickt. Der `PupilBridge` stellt sicher, dass alle Events – auch Fallbacks –
-dieses Format einhalten und bietet mit `refine_event(...)` eine API zum späteren
-Verfeinern.
+Die Tabletop-App sendet pro Ereignis ausschließlich eine minimierte Payload.
+Erlaubt sind die Felder `session`, `block`, `player`, `button`, `phase`,
+`round_index`, `game_player`, `player_role`, `accepted`, `decision` und
+`actor`. Weitere Metadaten wie `event_id`, `mapping_version`, `origin_device`
+oder Queue-/Heartbeat-Informationen werden nicht mehr erzeugt oder übertragen.
 
-Der neue `TimeReconciler` läuft im Hintergrund, verarbeitet regelmäßige
-`sync.heartbeat`-Marker und schätzt daraus Offset und Drift je Gerät (robuste
-lineare Regression mit Huber-Loss). Sobald verlässliche Parameter vorliegen,
-werden alle `provisional`-Events mit einem gemeinsamen Referenzzeitpunkt
-(`t_ref_ns`) aktualisiert. Die Ergebnisse landen sowohl über die Bridge (Cloud)
-als auch lokal in den Session-Datenbanken (`logs/events_<session>.sqlite3`)
-innerhalb der Tabelle `event_refinements`.
+Ein dediziertes Sync-Event (`sync.block.pre`) informiert die Geräte genau einmal
+vor dem Start eines neuen Blocks über die kommenden Block- und Session-IDs.
+Laufende Heartbeat- und Host-Sync-Schleifen entfallen vollständig.
 
 Einen schnellen Smoke-Test liefert:
 
@@ -33,7 +27,5 @@ Einen schnellen Smoke-Test liefert:
 python -m tabletop.app --demo
 ```
 
-Der Demo-Lauf simuliert Button-Events sowie Heartbeats, zeigt den Übergang von
-„provisional“ → „refined“ mit `event_id`, aktueller `mapping_version`,
-Konfidenz und Queue-Last direkt in der Konsole und erzeugt eine Demo-Datenbank
-(`logs/demo_refinement.sqlite3`).
+Der Demo-Lauf simuliert UI-Events mit der gleichen Whitelisting-Logik und
+gibt die gesendeten Payloads in der Konsole aus.

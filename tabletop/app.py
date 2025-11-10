@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import math
-import random
 import statistics
 import threading
 import time
@@ -45,8 +44,6 @@ from tabletop.overlay.process import (
 )
 from tabletop.tabletop_view import TabletopRoot
 from tabletop.pupil_bridge import PupilBridge
-from tabletop.engine import EventLogger
-from tabletop.sync.reconciler import TimeReconciler
 from tabletop.utils.runtime import (
     is_low_latency_disabled,
     is_perf_logging_enabled,
@@ -867,98 +864,75 @@ def _resolve_requested_players(
 
 
 def run_demo(*, duration: float = 8.0, heartbeat_interval: float = 2.0) -> None:
-    """Run a console demo that showcases event refinement without the UI."""
+    """Run a console demo that showcases the whitelisted payload flow."""
+
+    del heartbeat_interval  # kept for backward compatibility; no longer used
 
     class DemoBridge:
         def __init__(self) -> None:
-            self._offsets = {"VP1": 0.250, "VP2": 0.320}
-            self._events: dict[str, dict[str, Any]] = {}
+            self._players = ["VP1", "VP2"]
 
         def connected_players(self) -> list[str]:
-            return list(self._offsets.keys())
+            return list(self._players)
 
         def event_queue_load(self) -> tuple[int, int]:
-            return (0, 100)
+            return (0, len(self._players) * 10)
 
         def send_event(
             self, name: str, player: str, payload: Optional[dict[str, Any]] = None
         ) -> None:
-            payload = payload or {}
-            event_id = payload.get("event_id", "?")
-            mapping = payload.get("mapping_version")
-            print(
-                f"[demo] provisional {player}: {name} id={event_id} mapping={mapping}"
-            )
-            self._events[event_id] = payload
-
-        def refine_event(
-            self,
-            player: str,
-            event_id: str,
-            t_ref_ns: int,
-            *,
-            confidence: float,
-            mapping_version: int,
-            extra: Optional[dict[str, Any]] = None,
-        ) -> None:
-            print(
-                f"[demo] refined   {player}: id={event_id} -> {t_ref_ns}ns "
-                f"(v{mapping_version}, conf={confidence:.3f})"
-            )
-            if extra:
-                print(f"        extra={extra}")
-
-        def estimate_time_offset(self, player: str) -> Optional[float]:
-            base = self._offsets.get(player, 0.250)
-            drift = random.uniform(-0.00015, 0.00015)
-            noise = random.uniform(-0.0015, 0.0015)
-            updated = base + drift
-            self._offsets[player] = updated
-            return updated + noise
-
-    log.info("Starting refinement demo – this runs without the Kivy UI")
-    bridge = DemoBridge()
-    log_dir = Path.cwd() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    db_path = log_dir / "demo_refinement.sqlite3"
-    try:
-        db_path.unlink()
-    except FileNotFoundError:
-        pass
-
-    logger = EventLogger(str(db_path))
-    reconciler = TimeReconciler(bridge, logger, window_size=8)
-    reconciler.start()
-    try:
-        start = time.perf_counter()
-        next_marker = start
-        counter = 0
-        while time.perf_counter() - start < duration:
-            t_local_ns = time.perf_counter_ns()
-            event_id = f"demo-{counter:04d}"
-            payload = {
-                "event_id": event_id,
-                "t_local_ns": t_local_ns,
-                "provisional": True,
-                "mapping_version": reconciler.current_mapping_version,
-                "origin_device": "demo_host",
+            allowed = {
+                "session",
+                "block",
+                "player",
+                "button",
+                "phase",
+                "round_index",
+                "game_player",
+                "player_role",
+                "accepted",
+                "decision",
+                "actor",
             }
+            filtered = {k: v for k, v in (payload or {}).items() if k in allowed}
+            print(f"[demo] send_event {player}: {name} payload={filtered}")
+
+    log.info("Starting minimal sync demo – this runs without the Kivy UI")
+    bridge = DemoBridge()
+    session_id = "demo-session"
+    block_count = max(1, int(duration // 2) or 1)
+    phase = "DEMO"
+    start_time = time.perf_counter()
+    for block in range(1, block_count + 1):
+        for player in bridge.connected_players():
+            bridge.send_event(
+                "sync.block.pre",
+                player,
+                {
+                    "session": session_id,
+                    "block": block,
+                    "player": player,
+                },
+            )
+        round_count = 2
+        for round_index in range(round_count):
             for player in bridge.connected_players():
-                bridge.send_event("demo.button", player, dict(payload, player=player))
-            reconciler.on_event(event_id, t_local_ns)
-            counter += 1
-            now = time.perf_counter()
-            if now >= next_marker:
-                marker_ns = time.perf_counter_ns()
-                print(f"[demo] heartbeat marker emitted at {marker_ns}")
-                reconciler.submit_marker("demo.heartbeat", marker_ns)
-                next_marker = now + max(0.5, heartbeat_interval)
-            time.sleep(0.35)
-        time.sleep(1.0)
-    finally:
-        reconciler.stop()
-        logger.close()
-    print(f"[demo] SQLite refinements written to {db_path}")
+                payload = {
+                    "session": session_id,
+                    "block": block,
+                    "player": player,
+                    "button": "demo",
+                    "phase": phase,
+                    "round_index": round_index,
+                    "game_player": 1 if player == "VP1" else 2,
+                    "player_role": 1 if player == "VP1" else 2,
+                    "actor": "SYS",
+                }
+                bridge.send_event("demo.button", player, payload)
+                time.sleep(0.1)
+        if time.perf_counter() - start_time >= duration:
+            break
+    log.info("Demo completed")
 
 
 def main(
