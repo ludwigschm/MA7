@@ -22,6 +22,7 @@ class UIEvent:
     target: str | None = None
     broadcast: bool = False
     priority: Priority = "normal"
+    use_arrival_time: bool = False
 
 
 class EventRouter:
