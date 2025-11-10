@@ -73,6 +73,20 @@ ui_widgets.ASSETS = ASSETS
 
 STATE_FIELD_NAMES = set(TabletopState.__dataclass_fields__)
 
+ALLOWED_EVENT_KEYS = {
+    "session",
+    "block",
+    "player",
+    "button",
+    "phase",
+    "round_index",
+    "game_player",
+    "player_role",
+    "accepted",
+    "decision",
+    "actor",
+}
+
 
 class _AsyncMarkerBridge:
     def __init__(self, owner: "TabletopRoot") -> None:
@@ -521,11 +535,13 @@ class TabletopRoot(FloatLayout):
         finally:
             self._schedule_sync_heartbeat(immediate=False)
 
-    def _notify_event_pipeline(self, name: str, event_id: str, t_local_ns: int) -> None:
+    def _notify_event_pipeline(self, name: str) -> None:
         reconciler = self._time_reconciler
         if reconciler is None:
             return
         try:
+            event_id = str(uuid.uuid4())
+            t_local_ns = time.perf_counter_ns()
             reconciler.on_event(event_id, t_local_ns)
             if name.startswith("sync."):
                 reconciler.submit_marker(name, t_local_ns)
@@ -552,17 +568,10 @@ class TabletopRoot(FloatLayout):
         players = self._bridge_ready_players()
         if not players:
             return
-        event_id = str(uuid.uuid4())
-        t_local_ns = time.perf_counter_ns()
         priority = "high" if name.startswith(("sync.", "fix.")) else "normal"
-        mapping_version = self._current_ab_version
         payload_copy: Dict[str, Any] = {}
         if payload:
             payload_copy.update(payload)
-        session_label = self.session_id
-        bridge_session = self._bridge_session
-        bridge_block = self._bridge_block
-        session_number = self.session_number
 
         def _dispatch() -> None:
             bridge_ref = self._bridge
@@ -571,20 +580,9 @@ class TabletopRoot(FloatLayout):
             for player in players:
                 event_payload = self._bridge_payload_base(player=player)
                 event_payload.update(payload_copy)
-                event_payload["event_id"] = event_id
-                event_payload["t_local_ns"] = t_local_ns
-                event_payload["provisional"] = True
-                event_payload["mapping_version"] = mapping_version
-                event_payload["origin_device"] = self._origin_device_id
-                event_payload.setdefault("origin_player", player)
-                if session_label:
-                    event_payload.setdefault("session_label", session_label)
-                if session_number is not None:
-                    event_payload.setdefault("session_number", session_number)
-                if bridge_session is not None:
-                    event_payload.setdefault("bridge_session", bridge_session)
-                if bridge_block is not None:
-                    event_payload.setdefault("bridge_block", bridge_block)
+                event_payload = {
+                    k: v for k, v in event_payload.items() if k in ALLOWED_EVENT_KEYS
+                }
                 try:
                     bridge_ref.send_event(
                         name,
@@ -592,25 +590,9 @@ class TabletopRoot(FloatLayout):
                         event_payload,
                         priority=priority,
                     )
-                    if priority == "high":
-                        mirror_extra: Dict[str, Any] = {"mapping_version": mapping_version}
-                        if bridge_session is not None:
-                            mirror_extra["session"] = bridge_session
-                        if bridge_block is not None:
-                            mirror_extra["block"] = bridge_block
-                        if session_label:
-                            mirror_extra["session_label"] = session_label
-                        if session_number is not None:
-                            mirror_extra["session_number"] = session_number
-                        bridge_ref.send_host_mirror(
-                            player,
-                            event_id,
-                            t_local_ns,
-                            extra=mirror_extra,
-                        )
                 except Exception:
                     log.exception("Bridge event dispatch failed: %s", name)
-            self._notify_event_pipeline(name, event_id, t_local_ns)
+            self._notify_event_pipeline(name)
 
         self._bridge_dispatcher.submit(_dispatch)  # non-blocking: moved to worker
 
@@ -1815,7 +1797,7 @@ class TabletopRoot(FloatLayout):
             payload["t_mono_ns"] = time.perf_counter_ns()
         if "t_utc_iso" not in payload:
             payload["t_utc_iso"] = datetime.now(timezone.utc).isoformat()
-        log_entry = self.logger.log(
+        self.logger.log(
             round_idx,
             self.current_engine_phase(),
             actor,
@@ -1823,27 +1805,28 @@ class TabletopRoot(FloatLayout):
             payload
         )
         write_round_log(self, actor, action, payload, player)
-        bridge_payload = dict(log_entry)
-        bridge_payload.setdefault("session_id", self.session_id)
-        bridge_payload.update(
-            {
-                "actor": actor,
-                "game_player": player,
-                "payload": payload,
-                "event_id": payload.get("event_id"),
-                "t_mono_ns": payload.get("t_mono_ns"),
-                "t_utc_iso": payload.get("t_utc_iso"),
-            }
-        )
-        bridge_payload["round_index"] = round_idx
+        base = self._bridge_payload_base(player=None)
+        cloud_event: Dict[str, Any] = {}
+        for key in ("session", "block", "player"):
+            if key in base:
+                cloud_event[key] = base[key]
+        cloud_event["round_index"] = round_idx
+        cloud_event["actor"] = actor
         if player in (1, 2):
+            cloud_event["game_player"] = player
             role_value = self.player_roles.get(player)
             if role_value is not None:
-                bridge_payload["player_role"] = role_value
-        push_async(bridge_payload)
+                cloud_event["player_role"] = role_value
+        for key in ("button", "phase", "accepted", "decision"):
+            if key in payload:
+                cloud_event[key] = payload[key]
+        cloud_event = {
+            k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS
+        }
+        push_async(cloud_event)
         if self.marker_bridge and action != 'round_start':
             # non-blocking: moved bridge send to async enqueue
-            self.marker_bridge.enqueue(f"action.{action}", bridge_payload)
+            self.marker_bridge.enqueue(f"action.{action}", cloud_event)
 
     def prompt_session_number(self):
         if self.session_popup:
