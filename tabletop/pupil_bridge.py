@@ -21,17 +21,50 @@ from core.recording import DeviceClient, RecordingController, RecordingHttpError
 from core.time_sync import TimeSyncManager
 
 try:  # pragma: no cover - optional dependency
-    from pupil_labs.realtime_api.simple import Device, discover_devices
+    from pupil_labs.realtime_api.simple import (
+        Device,
+        discover_devices,
+        discover_one_device,
+    )
 except Exception:  # pragma: no cover - optional dependency
     Device = None  # type: ignore[assignment]
     discover_devices = None  # type: ignore[assignment]
+    discover_one_device = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional dependency
     import requests
-except Exception:  # pragma: no cover - optional dependency
-    requests = None  # type: ignore[assignment]
+except ModuleNotFoundError:  # pragma: no cover - fallback when requests missing
+    from urllib import request as _urllib_request
+    from urllib.error import HTTPError
+
+    class _ShimResponse:
+        def __init__(self, ok: bool) -> None:
+            self.ok = ok
+
+    class _RequestsShim:
+        @staticmethod
+        def get(url: str, timeout: float = 1.5) -> _ShimResponse:
+            try:
+                with _urllib_request.urlopen(url, timeout=timeout) as response:
+                    status = getattr(response, "status", 200)
+                    ok = 200 <= int(status) < 400
+            except HTTPError as exc:  # pragma: no cover - network dependent
+                ok = 200 <= exc.code < 400
+            except Exception as exc:  # pragma: no cover - network dependent
+                raise exc
+            return _ShimResponse(ok)
+
+    requests = _RequestsShim()  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
+
+def _reachable(ip: str, port: int, timeout: float = 1.5) -> bool:
+    try:
+        response = requests.get(f"http://{ip}:{port}/api/status", timeout=timeout)
+        return bool(response.ok)
+    except Exception:
+        return False
+
 
 from tabletop.utils.runtime import (
     event_batch_size_override,
@@ -400,26 +433,75 @@ class PupilBridge:
         if not cfg.ip or cfg.port is None:
             raise RuntimeError("IP oder Port fehlen für den Verbindungsaufbau")
 
-        ip = cfg.ip
-        port = int(cfg.port)
+        ip = str(cfg.ip).strip()
+        try:
+            port = int(cfg.port)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Ungültiger Port-Wert: {cfg.port!r}") from exc
+
+        if not _reachable(ip, port):
+            raise RuntimeError(
+                f"Kein Companion erreichbar unter http://{ip}:{port}/api/status. "
+                "Gleiches Netzwerk? Companion-App aktiv? Firewall?"
+            )
+
+        cfg.ip = ip
+        cfg.port = port
+
         first_error: Optional[BaseException] = None
         try:
-            return Device(ip, port)
+            return Device(address=ip, port=port)
         except Exception as exc:
             first_error = exc
             log.error(
-                "Device(ip, port) fehlgeschlagen (%s) – versuche Keyword-Signatur.",
-                exc,
+                "Direkte Verbindung zu %s:%s fehlgeschlagen: %s", ip, port, exc
             )
+            if discover_one_device is None and discover_devices is None:
+                raise
+
+        fallback_error: Optional[BaseException] = None
+        device: Any = None
+        if discover_one_device is not None:
+            try:
+                device = discover_one_device(timeout_seconds=2.0)
+            except Exception as exc:
+                fallback_error = exc
+            else:
+                if device is not None:
+                    return device
+
+        if discover_devices is None:
+            if fallback_error is not None:
+                raise fallback_error
+            if first_error is not None:
+                raise RuntimeError(
+                    f"Device konnte nicht initialisiert werden: {first_error}"
+                ) from first_error
+            raise RuntimeError("Keine Discovery-Funktionen verfügbar")
 
         try:
-            return Device(ip=ip, port=port)
+            devices = discover_devices(timeout_seconds=2.0)
         except Exception as exc:
-            if first_error:
+            if fallback_error is not None:
+                raise RuntimeError(
+                    f"Device konnte nicht initialisiert werden: {fallback_error}; {exc}"
+                ) from exc
+            if first_error is not None:
                 raise RuntimeError(
                     f"Device konnte nicht initialisiert werden: {first_error}; {exc}"
                 ) from exc
             raise
+
+        if not devices:
+            if fallback_error is not None:
+                raise fallback_error
+            if first_error is not None:
+                raise RuntimeError(
+                    f"Device konnte nicht initialisiert werden: {first_error}"
+                ) from first_error
+            raise RuntimeError("Discovery fand kein Companion-Gerät")
+
+        return devices[0]
 
     def _ensure_device_connection(self, device: Any) -> Any:
         connect_fn = getattr(device, "connect", None)
@@ -441,7 +523,7 @@ class PupilBridge:
 
     def _validate_device_identity(self, device: Any, cfg: NeonDeviceConfig) -> str:
         status = self._get_device_status(device)
-        if status is None and requests is not None and cfg.ip and cfg.port is not None:
+        if status is None and cfg.ip and cfg.port is not None:
             url = f"http://{cfg.ip}:{cfg.port}/api/status"
             try:
                 response = requests.get(url, timeout=self._connect_timeout)
@@ -618,7 +700,7 @@ class PupilBridge:
     ) -> None:
         identifier = device_id or player
         supported = False
-        if requests is not None and cfg.ip and cfg.port is not None:
+        if cfg.ip and cfg.port is not None:
             url = f"http://{cfg.ip}:{cfg.port}/api/frame_name"
             try:
                 response = requests.options(url, timeout=self._http_timeout)
@@ -1849,3 +1931,5 @@ class PupilBridge:
 
 
 __all__ = ["PupilBridge"]
+
+
