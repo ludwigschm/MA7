@@ -38,7 +38,7 @@ class _FakeDevice:
 
 @pytest.fixture
 def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
-    monkeypatch.setattr("tabletop.pupil_bridge.requests", None)
+    monkeypatch.setattr("tabletop.pupil_bridge._reachable", lambda *_, **__: True)
     monkeypatch.setenv("LOW_LATENCY_DISABLED", "1")
     config_path = Path("/tmp/test_neon_devices.txt")
     config_path.write_text("VP1_IP=127.0.0.1\nVP1_PORT=8080\n", encoding="utf-8")

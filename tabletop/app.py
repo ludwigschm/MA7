@@ -7,6 +7,7 @@ import os
 import math
 import random
 import statistics
+import threading
 import time
 from collections import deque
 from contextlib import suppress
@@ -29,6 +30,10 @@ Config.write()
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.lang import Builder
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.popup import Popup
 
 from tabletop.data.config import ARUCO_OVERLAY_PATH
 from tabletop.logging.round_csv import close_round_log, flush_round_log
@@ -83,6 +88,7 @@ class TabletopApp(App):
         bridge: Optional[PupilBridge] = None,
         single_block_mode: bool = False,
         logging_queue: Optional[Queue] = None,
+        bridge_error: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         self._overlay_process: Optional[OverlayProcess] = None
@@ -119,6 +125,8 @@ class TabletopApp(App):
         self._frame_log_event = None
         self._queue_monitor_event = None
         self._last_queue_warning = 0.0
+        self._bridge_connect_error_reason: Optional[str] = bridge_error
+        self._bridge_retry_popup: Optional[Popup] = None
         super().__init__(**kwargs)
 
     @staticmethod
@@ -564,6 +572,113 @@ class TabletopApp(App):
         if callable(cancel):
             cancel()
 
+    def _show_bridge_error_dialog(self, reason: str) -> None:
+        if self._bridge_retry_popup is not None:
+            try:
+                self._bridge_retry_popup.dismiss()
+            except Exception:
+                pass
+            self._bridge_retry_popup = None
+
+        content = BoxLayout(orientation="vertical", spacing=16, padding=24)
+        message_label = Label(
+            text="Verbindung fehlgeschlagen. Prüfe Netzwerk/Companion.\nErneut versuchen?",
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+        )
+        message_label.bind(
+            texture_size=lambda inst, _value: setattr(inst, "height", inst.texture_size[1] + 10),
+            width=lambda inst, value: setattr(inst, "text_size", (value, None)),
+        )
+        content.add_widget(message_label)
+
+        reason = (reason or "").strip()
+        if reason:
+            detail_label = Label(
+                text=f"[color=888888]{reason}[/color]",
+                markup=True,
+                halign="center",
+                valign="middle",
+                size_hint_y=None,
+            )
+            detail_label.bind(
+                texture_size=lambda inst, _value: setattr(inst, "height", inst.texture_size[1] + 10),
+                width=lambda inst, value: setattr(inst, "text_size", (value, None)),
+            )
+            content.add_widget(detail_label)
+
+        buttons = BoxLayout(orientation="horizontal", spacing=12, size_hint_y=None, height=52)
+        retry_button = Button(text="Erneut versuchen", size_hint=(0.5, None), height=52)
+        cancel_button = Button(text="Schließen", size_hint=(0.5, None), height=52)
+        buttons.add_widget(retry_button)
+        buttons.add_widget(cancel_button)
+        content.add_widget(buttons)
+
+        popup = Popup(
+            title="Companion-Verbindung",
+            content=content,
+            size_hint=(0.6, 0.4),
+            auto_dismiss=False,
+        )
+        self._bridge_retry_popup = popup
+
+        retry_button.bind(on_release=lambda *_: self._retry_bridge_connection())
+        cancel_button.bind(on_release=lambda *_: popup.dismiss())
+
+        popup.open()
+
+    def _retry_bridge_connection(self) -> None:
+        popup = self._bridge_retry_popup
+        if popup is not None:
+            try:
+                popup.dismiss()
+            except Exception:
+                pass
+            self._bridge_retry_popup = None
+
+        bridge = self._bridge
+        if bridge is None:
+            return
+
+        def _attempt() -> None:
+            try:
+                bridge.connect()
+            except Exception as exc:  # pragma: no cover - network dependent
+                error_text = str(exc)
+                log.error("Erneuter Companion-Verbindungsversuch fehlgeschlagen: %s", exc)
+                self._bridge_connect_error_reason = error_text
+
+                def _show(_dt: float) -> None:
+                    self._show_bridge_error_dialog(error_text)
+
+                Clock.schedule_once(_show, 0.0)
+            else:
+                self._bridge_connect_error_reason = None
+
+                def _apply(_dt: float) -> None:
+                    root = cast(Optional[TabletopRoot], self.root)
+                    try:
+                        connected = set(bridge.connected_players())
+                    except Exception:
+                        connected = set()
+                    if connected:
+                        self._players.update(connected)
+                    if root is not None:
+                        try:
+                            root.update_bridge_context(
+                                bridge=bridge,
+                                players=set(self._players),
+                                session=self._session,
+                                block=self._block,
+                            )
+                        except AttributeError:
+                            pass
+
+                Clock.schedule_once(_apply, 0.0)
+
+        threading.Thread(target=_attempt, name="BridgeReconnect", daemon=True).start()
+
     def on_start(self) -> None:  # pragma: no cover - framework callback
         super().on_start()
         root = cast(Optional[TabletopRoot], self.root)
@@ -641,6 +756,14 @@ class TabletopApp(App):
             self._queue_monitor_event = Clock.schedule_interval(
                 self._monitor_queues, 1.0
             )
+
+        if self._bridge_connect_error_reason:
+            error_text = self._bridge_connect_error_reason
+
+            def _show_dialog(_dt: float) -> None:
+                self._show_bridge_error_dialog(error_text or "")
+
+            Clock.schedule_once(_show_dialog, 0.2)
 
     def on_stop(self) -> None:  # pragma: no cover - framework callback
         root = cast(Optional[TabletopRoot], self.root)
@@ -849,10 +972,13 @@ def main(
     logging_listener, logging_queue = _configure_async_logging()
 
     bridge = PupilBridge()
+    connect_error: Optional[str] = None
     try:
         bridge.connect()
-    except Exception:  # pragma: no cover - defensive fallback
-        log.exception("Failed to connect to Pupil devices")
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        connect_error = str(exc)
+        log.error("Companion-Verbindung fehlgeschlagen: %s", exc)
+        log.debug("Stacktrace für Companion-Verbindungsfehler", exc_info=True)
 
     try:
         connected_players = bridge.connected_players()
@@ -871,6 +997,7 @@ def main(
         bridge=bridge,
         single_block_mode=single_block_mode,
         logging_queue=logging_queue,
+        bridge_error=connect_error,
     )
     try:
         app.run()
