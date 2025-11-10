@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import csv
 import logging
+import os
 import queue
 import json
 import pathlib
@@ -327,7 +328,10 @@ class EventLogger:
             self._flush_rows(pending)
 
     def _flush_rows(
-        self, rows: List[Tuple[str, int, str, str, str, str, int, str]]
+        self,
+        rows: List[Tuple[str, int, str, str, str, str, int, str]],
+        *,
+        force_sync: bool = False,
     ) -> None:
         if not rows:
             return
@@ -340,6 +344,13 @@ class EventLogger:
             with open(self._csv_path, "a", encoding="utf-8", newline="") as fp:
                 writer = csv.writer(fp)
                 writer.writerows(rows)
+                if force_sync:
+                    fp.flush()
+                    os.fsync(fp.fileno())
+        if force_sync and self._csv_path is None:
+            # Ensure SQLite performs a blocking flush when requested.
+            with self._db_lock:
+                self.conn.execute("PRAGMA wal_checkpoint(FULL)")
         if self._perf_logging:
             duration = (time.perf_counter() - start) * 1000.0
             log.debug("Event flush wrote %d rows in %.2f ms", len(rows), duration)
@@ -352,9 +363,11 @@ class EventLogger:
         actor: str,
         action: str,
         payload: Dict[str, Any],
+        *,
+        t_mono_ns: int,
+        t_utc_iso: str,
+        blocking: bool = False,
     ) -> Dict[str, Any]:
-        t_mono_ns = time.perf_counter_ns()
-        t_utc_iso = datetime.now(timezone.utc).isoformat()
         row = (
             session_id,
             round_idx,
@@ -365,7 +378,7 @@ class EventLogger:
             t_mono_ns,
             t_utc_iso,
         )
-        if self._use_async and self._event_queue is not None:
+        if (not blocking) and self._use_async and self._event_queue is not None:
             try:
                 self._event_queue.put_nowait(row)
             except queue.Full:
@@ -394,7 +407,7 @@ class EventLogger:
                         )
                         self._last_queue_log = time.monotonic()
         else:
-            self._flush_rows([row])
+            self._flush_rows([row], force_sync=True)
         return {
             "session_id": session_id,
             "round_idx": round_idx,

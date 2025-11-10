@@ -5,6 +5,8 @@ import itertools
 import logging
 import os
 import time
+import uuid
+from datetime import datetime
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -73,6 +75,7 @@ ALLOWED_EVENT_KEYS = {
     "session",
     "block",
     "player",
+    "event_id",
     "button",
     "phase",
     "round_index",
@@ -639,6 +642,40 @@ class TabletopRoot(FloatLayout):
         index = max(0, min(index, total - 1))
         return index + 1
 
+    @staticmethod
+    def _strict_logging_enabled() -> bool:
+        return os.getenv("STRICT_LOGGING") == "1"
+
+    def _log_interaction_phase(
+        self,
+        player: Optional[int],
+        action: str,
+        payload: Dict[str, Any],
+        *,
+        event_id: str,
+        phase: str,
+        t_mono_ns: int,
+        t_utc_iso: str,
+        blocking: bool,
+        marker: str,
+    ) -> bool:
+        try:
+            self.log_event(
+                player,
+                action,
+                payload,
+                event_id=event_id,
+                phase=phase,
+                t_mono_ns=t_mono_ns,
+                t_utc_iso=t_utc_iso,
+                blocking=blocking,
+            )
+        except Exception:
+            log.exception("Failed to log %s for %s", phase, action)
+            return False
+        log.info("%s %s event_id=%s", marker, action, event_id)
+        return True
+
     def _finalize_session_setup(
         self,
         session_label: str,
@@ -704,23 +741,23 @@ class TabletopRoot(FloatLayout):
     def _configure_widgets(self):
         btn_start_p1 = self.wid_safe('btn_start_p1')
         if btn_start_p1 is not None:
-            btn_start_p1.bind(on_release=lambda *_: self.start_pressed(1))
+            btn_start_p1.bind(on_press=lambda *_: self.start_pressed(1))
             btn_start_p1.set_rotation(0)
         btn_start_p2 = self.wid_safe('btn_start_p2')
         if btn_start_p2 is not None:
-            btn_start_p2.bind(on_release=lambda *_: self.start_pressed(2))
+            btn_start_p2.bind(on_press=lambda *_: self.start_pressed(2))
             btn_start_p2.set_rotation(180)
 
         pause_btn_p1 = self.wid_safe('pause_btn_p1')
         if pause_btn_p1 is not None:
-            pause_btn_p1.bind(on_release=lambda *_: self.start_pressed(1))
+            pause_btn_p1.bind(on_press=lambda *_: self.start_pressed(1))
             pause_btn_p1.set_rotation(0)
             pause_btn_p1.set_live(False)
             pause_btn_p1.disabled = True
             pause_btn_p1.opacity = 0
         pause_btn_p2 = self.wid_safe('pause_btn_p2')
         if pause_btn_p2 is not None:
-            pause_btn_p2.bind(on_release=lambda *_: self.start_pressed(2))
+            pause_btn_p2.bind(on_press=lambda *_: self.start_pressed(2))
             pause_btn_p2.set_rotation(180)
             pause_btn_p2.set_live(False)
             pause_btn_p2.disabled = True
@@ -728,16 +765,16 @@ class TabletopRoot(FloatLayout):
 
         p1_outer = self.wid_safe('p1_outer')
         if p1_outer is not None:
-            p1_outer.bind(on_release=lambda *_: self.tap_card(1, 'outer'))
+            p1_outer.bind(on_press=lambda *_: self.tap_card(1, 'outer'))
         p1_inner = self.wid_safe('p1_inner')
         if p1_inner is not None:
-            p1_inner.bind(on_release=lambda *_: self.tap_card(1, 'inner'))
+            p1_inner.bind(on_press=lambda *_: self.tap_card(1, 'inner'))
         p2_outer = self.wid_safe('p2_outer')
         if p2_outer is not None:
-            p2_outer.bind(on_release=lambda *_: self.tap_card(2, 'outer'))
+            p2_outer.bind(on_press=lambda *_: self.tap_card(2, 'outer'))
         p2_inner = self.wid_safe('p2_inner')
         if p2_inner is not None:
-            p2_inner.bind(on_release=lambda *_: self.tap_card(2, 'inner'))
+            p2_inner.bind(on_press=lambda *_: self.tap_card(2, 'inner'))
 
         self.signal_buttons = {
             1: {
@@ -754,12 +791,12 @@ class TabletopRoot(FloatLayout):
         for level, btn_id in self.signal_buttons.get(1, {}).items():
             btn = self.wid_safe(btn_id)
             if btn is not None:
-                btn.bind(on_release=lambda _, lvl=level: self.pick_signal(1, lvl))
+                btn.bind(on_press=lambda _, lvl=level: self.pick_signal(1, lvl))
                 btn.set_rotation(0)
         for level, btn_id in self.signal_buttons.get(2, {}).items():
             btn = self.wid_safe(btn_id)
             if btn is not None:
-                btn.bind(on_release=lambda _, lvl=level: self.pick_signal(2, lvl))
+                btn.bind(on_press=lambda _, lvl=level: self.pick_signal(2, lvl))
                 btn.set_rotation(180)
 
         self.decision_buttons = {
@@ -775,12 +812,12 @@ class TabletopRoot(FloatLayout):
         for choice, btn_id in self.decision_buttons.get(1, {}).items():
             btn = self.wid_safe(btn_id)
             if btn is not None:
-                btn.bind(on_release=lambda _, ch=choice: self.pick_decision(1, ch))
+                btn.bind(on_press=lambda _, ch=choice: self.pick_decision(1, ch))
                 btn.set_rotation(0)
         for choice, btn_id in self.decision_buttons.get(2, {}).items():
             btn = self.wid_safe(btn_id)
             if btn is not None:
-                btn.bind(on_release=lambda _, ch=choice: self.pick_decision(2, ch))
+                btn.bind(on_press=lambda _, ch=choice: self.pick_decision(2, ch))
                 btn.set_rotation(180)
 
         self.center_cards = {
@@ -1142,52 +1179,181 @@ class TabletopRoot(FloatLayout):
     def start_pressed(self, who:int):
         started = time.perf_counter()
         try:
-            if not self._input_debouncer.allow(f"start:{who}", interval_override_ms=10.0):
+            event_id = str(uuid.uuid4())
+            t_mono_ns = time.monotonic_ns()
+            t_utc_iso = datetime.utcnow().isoformat()
+            blocking = self._strict_logging_enabled()
+            allowed_press = self._input_debouncer.allow(
+                f"start:{who}", interval_override_ms=10.0
+            )
+            action = (
+                "start_click"
+                if self.phase == UXPhase.WAIT_BOTH_START
+                else "next_round_click"
+            )
+            blocked_reason: Optional[str] = None
+            if not allowed_press:
+                blocked_reason = "debounced"
+            elif self.session_finished and not self.in_block_pause:
+                blocked_reason = "session_finished"
+            else:
+                allowed_phase = self.phase in (
+                    UXPhase.WAIT_BOTH_START,
+                    UXPhase.SHOWDOWN,
+                )
+                if not allowed_phase and not self.in_block_pause:
+                    blocked_reason = "phase_blocked"
+
+            input_payload = {
+                "button": "start",
+                "accepted": blocked_reason is None,
+                "reason": blocked_reason,
+            }
+            if not self._log_interaction_phase(
+                who,
+                action,
+                input_payload,
+                event_id=event_id,
+                phase="input_received",
+                t_mono_ns=t_mono_ns,
+                t_utc_iso=t_utc_iso,
+                blocking=blocking,
+                marker="INPUT_LOGGED_BEFORE_LOGIC",
+            ):
                 return
-            if self.session_finished and not self.in_block_pause:
+            if blocked_reason is not None:
                 return
-            allowed_phase = self.phase in (UXPhase.WAIT_BOTH_START, UXPhase.SHOWDOWN)
-            if not allowed_phase and not self.in_block_pause:
-                return
+
             if who == 1:
                 self.p1_pressed = True
             else:
                 self.p2_pressed = True
-            self.record_action(who, 'Play gedrückt')
-            if self.session_configured:
-                action = 'start_click' if self.phase == UXPhase.WAIT_BOTH_START else 'next_round_click'
-                self.log_event(who, action)
-            if self.p1_pressed and self.p2_pressed:
-                # in nächste Phase
+
+            both_pressed = self.p1_pressed and self.p2_pressed
+            outcome_payload = {
+                "button": "start",
+                "accepted": True,
+                "both_pressed": both_pressed,
+                "in_block_pause": self.in_block_pause,
+                "in_round_pause": self.in_round_pause,
+            }
+
+            if both_pressed:
                 self.p1_pressed = False
                 self.p2_pressed = False
                 if self.in_round_pause:
                     self.in_round_pause = False
-                    self.pause_message = ''
+                    self.pause_message = ""
                     self.update_pause_overlay()
                     self.log_round_start_if_pending()
                     self.prepare_next_round(start_immediately=True)
+                    outcome_payload.update({
+                        "resume": "round_pause",
+                        "next_phase": "next_round",
+                    })
+                    if not self._log_interaction_phase(
+                        who,
+                        action,
+                        outcome_payload,
+                        event_id=event_id,
+                        phase="action_applied",
+                        t_mono_ns=time.monotonic_ns(),
+                        t_utc_iso=datetime.utcnow().isoformat(),
+                        blocking=blocking,
+                        marker="OUTCOME_LOGGED_AFTER_LOGIC",
+                    ):
+                        return
+                    self.record_action(who, "Play gedrückt")
                     return
                 if self.in_block_pause:
                     self.in_block_pause = False
-                    self.pause_message = ''
+                    self.pause_message = ""
                     self.update_pause_overlay()
                     self.setup_round()
                     if self.session_finished:
                         self.apply_phase()
+                        outcome_payload["resume"] = "block_pause_finished"
+                        self._log_interaction_phase(
+                            who,
+                            action,
+                            outcome_payload,
+                            event_id=event_id,
+                            phase="action_applied",
+                            t_mono_ns=time.monotonic_ns(),
+                            t_utc_iso=datetime.utcnow().isoformat(),
+                            blocking=blocking,
+                            marker="OUTCOME_LOGGED_AFTER_LOGIC",
+                        )
+                        self.record_action(who, "Play gedrückt")
                         return
                     self.phase = UXPhase.WAIT_BOTH_START
                     self.apply_phase()
                     self.log_round_start_if_pending()
                     self.continue_after_start_press()
+                    outcome_payload.update({
+                        "resume": "block_pause",
+                        "next_phase": getattr(self.phase, "name", str(self.phase)),
+                    })
+                    self._log_interaction_phase(
+                        who,
+                        action,
+                        outcome_payload,
+                        event_id=event_id,
+                        phase="action_applied",
+                        t_mono_ns=time.monotonic_ns(),
+                        t_utc_iso=datetime.utcnow().isoformat(),
+                        blocking=blocking,
+                        marker="OUTCOME_LOGGED_AFTER_LOGIC",
+                    )
+                    self.record_action(who, "Play gedrückt")
                     return
-                elif self.phase == UXPhase.SHOWDOWN:
+                if self.phase == UXPhase.SHOWDOWN:
                     self.log_round_start_if_pending()
                     self.prepare_next_round(start_immediately=True)
+                    outcome_payload["resume"] = "showdown_to_next_round"
+                    self._log_interaction_phase(
+                        who,
+                        action,
+                        outcome_payload,
+                        event_id=event_id,
+                        phase="action_applied",
+                        t_mono_ns=time.monotonic_ns(),
+                        t_utc_iso=datetime.utcnow().isoformat(),
+                        blocking=blocking,
+                        marker="OUTCOME_LOGGED_AFTER_LOGIC",
+                    )
+                    self.record_action(who, "Play gedrückt")
                     return
-                else:
-                    self.log_round_start_if_pending()
-                    self.continue_after_start_press()
+                self.log_round_start_if_pending()
+                self.continue_after_start_press()
+                outcome_payload["resume"] = "round_start"
+                self._log_interaction_phase(
+                    who,
+                    action,
+                    outcome_payload,
+                    event_id=event_id,
+                    phase="action_applied",
+                    t_mono_ns=time.monotonic_ns(),
+                    t_utc_iso=datetime.utcnow().isoformat(),
+                    blocking=blocking,
+                    marker="OUTCOME_LOGGED_AFTER_LOGIC",
+                )
+                self.record_action(who, "Play gedrückt")
+                return
+
+            # Nur einzelner Spieler hat gedrückt
+            self._log_interaction_phase(
+                who,
+                action,
+                outcome_payload,
+                event_id=event_id,
+                phase="action_applied",
+                t_mono_ns=time.monotonic_ns(),
+                t_utc_iso=datetime.utcnow().isoformat(),
+                blocking=blocking,
+                marker="OUTCOME_LOGGED_AFTER_LOGIC",
+            )
+            self.record_action(who, "Play gedrückt")
         finally:
             self._record_handler_duration('start_pressed', started)
 
@@ -1211,16 +1377,61 @@ class TabletopRoot(FloatLayout):
     def tap_card(self, who:int, which:str):
         started = time.perf_counter()
         try:
-            if not self._input_debouncer.allow(f"tap:{who}:{which}"):
+            event_id = str(uuid.uuid4())
+            t_mono_ns = time.monotonic_ns()
+            t_utc_iso = datetime.utcnow().isoformat()
+            blocking = self._strict_logging_enabled()
+            allowed_press = self._input_debouncer.allow(f"tap:{who}:{which}")
+            input_payload = {
+                "button": f"card_{which}",
+                "card_slot": which,
+                "accepted": allowed_press,
+            }
+            if not self._log_interaction_phase(
+                who,
+                "tap_card",
+                input_payload,
+                event_id=event_id,
+                phase="input_received",
+                t_mono_ns=t_mono_ns,
+                t_utc_iso=t_utc_iso,
+                blocking=blocking,
+                marker="INPUT_LOGGED_BEFORE_LOGIC",
+            ):
                 return
+            if not allowed_press:
+                return
+
             result = self.controller.tap_card(who, which)
-            button_name = f'card_{which}'
+            button_name = f"card_{which}"
+            outcome_payload = dict(result.log_payload or {})
+            outcome_payload.update(
+                {
+                    "button": button_name,
+                    "card_slot": which,
+                    "allowed": bool(result.allowed),
+                }
+            )
+            action_name = result.log_action or "tap_card"
+
+            self._log_interaction_phase(
+                who,
+                action_name,
+                outcome_payload,
+                event_id=event_id,
+                phase="action_applied",
+                t_mono_ns=time.monotonic_ns(),
+                t_utc_iso=datetime.utcnow().isoformat(),
+                blocking=blocking,
+                marker="OUTCOME_LOGGED_AFTER_LOGIC",
+            )
+
             self._emit_button_bridge_event(
                 button_name,
                 player=who,
                 extra={
-                    'allowed': bool(result.allowed),
-                    'card_slot': which,
+                    "allowed": bool(result.allowed),
+                    "card_slot": which,
                 },
             )
             if not result.allowed:
@@ -1228,12 +1439,7 @@ class TabletopRoot(FloatLayout):
             widget = self.card_widget_for_player(who, which)
             if widget is None:
                 return
-            # 1) Log zuerst (lokal + async Pupylabs), um Latenz im Lab zu minimieren
-            if result.log_action:
-                self.log_event(who, result.log_action, result.log_payload or {})
-            # 2) Danach visuelle Änderung (Flip)
             widget.flip()
-            # 3) Dann lokale Aktionshistorie
             if result.record_text:
                 self.record_action(who, result.record_text)
             if result.next_phase:
@@ -1244,23 +1450,62 @@ class TabletopRoot(FloatLayout):
     def pick_signal(self, player:int, level:str):
         started = time.perf_counter()
         try:
-            if not self._input_debouncer.allow(f"signal:{player}:{level}"):
+            event_id = str(uuid.uuid4())
+            t_mono_ns = time.monotonic_ns()
+            t_utc_iso = datetime.utcnow().isoformat()
+            blocking = self._strict_logging_enabled()
+            allowed_press = self._input_debouncer.allow(f"signal:{player}:{level}")
+            input_payload = {
+                "button": f"signal_{level}",
+                "signal_level": level,
+                "accepted": allowed_press,
+            }
+            if not self._log_interaction_phase(
+                player,
+                "pick_signal",
+                input_payload,
+                event_id=event_id,
+                phase="input_received",
+                t_mono_ns=t_mono_ns,
+                t_utc_iso=t_utc_iso,
+                blocking=blocking,
+                marker="INPUT_LOGGED_BEFORE_LOGIC",
+            ):
                 return
+            if not allowed_press:
+                return
+
             result = self.controller.pick_signal(player, level)
+            outcome_payload = dict(result.log_payload or {})
+            outcome_payload.update(
+                {
+                    "button": f"signal_{level}",
+                    "signal_level": level,
+                    "accepted": bool(result.accepted),
+                }
+            )
+            self._log_interaction_phase(
+                player,
+                "signal_choice",
+                outcome_payload,
+                event_id=event_id,
+                phase="action_applied",
+                t_mono_ns=time.monotonic_ns(),
+                t_utc_iso=datetime.utcnow().isoformat(),
+                blocking=blocking,
+                marker="OUTCOME_LOGGED_AFTER_LOGIC",
+            )
+
             self._emit_button_bridge_event(
-                f'signal_{level}',
+                f"signal_{level}",
                 player=player,
                 extra={
-                    'accepted': bool(result.accepted),
-                    'signal_level': level,
+                    "accepted": bool(result.accepted),
+                    "signal_level": level,
                 },
             )
             if not result.accepted:
                 return
-            # 1) Log zuerst
-            if result.log_payload:
-                self.log_event(player, 'signal_choice', result.log_payload)
-            # 2) Danach UI-Update
             for lvl, btn_id in self.signal_buttons.get(player, {}).items():
                 btn = self.wid_safe(btn_id)
                 if btn is None:
@@ -1270,7 +1515,6 @@ class TabletopRoot(FloatLayout):
                 else:
                     btn.set_live(False)
                     btn.disabled = True
-            # 3) Aktionslog in der UI
             self.record_action(player, f'Signal gewählt: {self.describe_level(level)}')
             self.update_user_displays()
             if result.next_phase:
@@ -1282,15 +1526,58 @@ class TabletopRoot(FloatLayout):
     def pick_decision(self, player:int, decision:str):
         started = time.perf_counter()
         try:
-            if not self._input_debouncer.allow(f"decision:{player}:{decision}"):
+            event_id = str(uuid.uuid4())
+            t_mono_ns = time.monotonic_ns()
+            t_utc_iso = datetime.utcnow().isoformat()
+            blocking = self._strict_logging_enabled()
+            allowed_press = self._input_debouncer.allow(f"decision:{player}:{decision}")
+            input_payload = {
+                "button": f"decision_{decision}",
+                "decision": decision,
+                "accepted": allowed_press,
+            }
+            if not self._log_interaction_phase(
+                player,
+                "pick_decision",
+                input_payload,
+                event_id=event_id,
+                phase="input_received",
+                t_mono_ns=t_mono_ns,
+                t_utc_iso=t_utc_iso,
+                blocking=blocking,
+                marker="INPUT_LOGGED_BEFORE_LOGIC",
+            ):
                 return
+            if not allowed_press:
+                return
+
             result = self.controller.pick_decision(player, decision)
+            outcome_payload = dict(result.log_payload or {})
+            outcome_payload.update(
+                {
+                    "button": f"decision_{decision}",
+                    "decision": decision,
+                    "accepted": bool(result.accepted),
+                }
+            )
+            self._log_interaction_phase(
+                player,
+                "call_choice",
+                outcome_payload,
+                event_id=event_id,
+                phase="action_applied",
+                t_mono_ns=time.monotonic_ns(),
+                t_utc_iso=datetime.utcnow().isoformat(),
+                blocking=blocking,
+                marker="OUTCOME_LOGGED_AFTER_LOGIC",
+            )
+
             self._emit_button_bridge_event(
-                f'decision_{decision}',
+                f"decision_{decision}",
                 player=player,
                 extra={
-                    'accepted': bool(result.accepted),
-                    'decision': decision,
+                    "accepted": bool(result.accepted),
+                    "decision": decision,
                 },
             )
             if not result.accepted:
@@ -1305,8 +1592,6 @@ class TabletopRoot(FloatLayout):
                     btn.set_live(False)
                     btn.disabled = True
             self.record_action(player, f'Entscheidung: {decision.upper()}')
-            if result.log_payload:
-                self.log_event(player, 'call_choice', result.log_payload)
             self.update_user_displays()
             if result.next_phase:
                 Clock.schedule_once(lambda *_: self.goto(result.next_phase), 0.2)
@@ -1765,46 +2050,73 @@ class TabletopRoot(FloatLayout):
             return "P2"
         return "P1" if player == 1 else "P2"
 
-    def log_event(self, player: int, action: str, payload=None):
+    def log_event(
+        self,
+        player: Optional[int],
+        action: str,
+        payload=None,
+        *,
+        event_id: Optional[str] = None,
+        phase: str = "action_applied",
+        t_mono_ns: Optional[int] = None,
+        t_utc_iso: Optional[str] = None,
+        blocking: Optional[bool] = None,
+    ):
         if not self.logger or not self.session_configured:
-            return
+            return None
         if isinstance(payload, dict):
-            payload = dict(payload)
+            payload_dict = dict(payload)
         elif payload is None:
-            payload = {}
+            payload_dict = {}
         else:
-            payload = {"value": payload}
+            payload_dict = {"value": payload}
+        event_id = event_id or str(uuid.uuid4())
+        payload_dict.setdefault("event_id", event_id)
+        payload_dict.setdefault("phase", phase)
         actor = self._actor_label(player)
         round_idx = max(0, self.round - 1)
-        self.logger.log(
-            round_idx,
-            self.current_engine_phase(),
-            actor,
-            action,
-            payload
+        event_payload = {
+            "session_id": self.session_id,
+            "round_idx": round_idx,
+            "engine_phase": self.current_engine_phase(),
+            "actor": actor,
+            "action": action,
+            "payload": payload_dict,
+            "event_id": event_id,
+            "phase": phase,
+            "t_mono_ns": t_mono_ns,
+            "t_utc_iso": t_utc_iso,
+        }
+        if player is not None:
+            event_payload["player"] = player
+        effective_blocking = (
+            blocking if blocking is not None else os.getenv("STRICT_LOGGING") == "1"
         )
-        write_round_log(self, actor, action, payload, player)
+        record = self.logger.log_event(event_payload, blocking=effective_blocking)
+        write_round_log(self, actor, action, payload_dict, player)
         base = self._bridge_payload_base(player=None)
         cloud_event = {k: base[k] for k in ("session", "block", "player") if k in base}
-        cloud_event.update({
-            "round_index": round_idx,
-            "actor": actor,
-        })
+        cloud_event.update(
+            {
+                "round_index": round_idx,
+                "actor": actor,
+                "event_id": event_id,
+                "phase": phase,
+            }
+        )
         if player is not None:
             cloud_event["game_player"] = player
         role_value = self.player_roles.get(player)
         if role_value is not None:
             cloud_event["player_role"] = role_value
-        for k in ("button", "phase", "accepted", "decision"):
-            if k in payload:
-                cloud_event[k] = payload[k]
-        cloud_event = {
-            k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS
-        }
+        for key in ("button", "accepted", "decision"):
+            if key in payload_dict:
+                cloud_event[key] = payload_dict[key]
+        cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS}
         push_async(cloud_event)
-        if self.marker_bridge and action != 'round_start':
-            # non-blocking: moved bridge send to async enqueue
+        if self.marker_bridge and action != "round_start":
             self.marker_bridge.enqueue(f"action.{action}", cloud_event)
+        return record
 
     def prompt_session_number(self):
         if self.session_popup:
@@ -1884,8 +2196,8 @@ class TabletopRoot(FloatLayout):
             popup.dismiss()
             self.session_popup = None
 
-        ok_button.bind(on_release=_on_ok)
-        cancel_button.bind(on_release=_on_cancel)
+        ok_button.bind(on_press=_on_ok)
+        cancel_button.bind(on_press=_on_cancel)
         popup.open()
 
     def _start_overlay_with_path(self, process: Optional[Any]) -> Optional[Any]:

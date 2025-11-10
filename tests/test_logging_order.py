@@ -30,10 +30,15 @@ def tabletop_root(monkeypatch, mocker):
 def test_tap_card_logs_before_flip(mocker, tabletop_root):
     order = []
     widget = mocker.Mock()
-    widget.flip.side_effect = lambda: order.append("flip")
+    widget.flip.side_effect = lambda: order.append(("flip", None))
     tabletop_root.card_widget_for_player = mocker.Mock(return_value=widget)
-    tabletop_root.record_action = mocker.Mock(side_effect=lambda *args, **kwargs: order.append("record"))
-    tabletop_root.log_event = mocker.Mock(side_effect=lambda *args, **kwargs: order.append("log"))
+    tabletop_root.record_action = mocker.Mock(
+        side_effect=lambda *args, **kwargs: order.append(("record", None))
+    )
+    def _log_recorder(*_args, **kwargs):
+        order.append(("log", kwargs.get("phase")))
+
+    tabletop_root.log_event = mocker.Mock(side_effect=_log_recorder)
 
     result = SimpleNamespace(
         allowed=True,
@@ -46,19 +51,29 @@ def test_tap_card_logs_before_flip(mocker, tabletop_root):
 
     tabletop_root.tap_card(1, "inner")
 
-    assert tabletop_root.log_event.call_count == 1
+    assert tabletop_root.log_event.call_count == 2
     assert widget.flip.call_count == 1
-    assert order[:3] == ["log", "flip", "record"]
+    assert order[:4] == [
+        ("log", "input_received"),
+        ("log", "action_applied"),
+        ("flip", None),
+        ("record", None),
+    ]
 
 
 def test_pick_signal_logs_before_button_update(mocker, tabletop_root):
     order = []
     button = mocker.Mock()
-    button.set_pressed_state.side_effect = lambda: order.append("pressed")
+    button.set_pressed_state.side_effect = lambda: order.append(("pressed", None))
     tabletop_root.signal_buttons = {1: {"mittel": "btn_mid"}}
     tabletop_root.wid_safe = mocker.Mock(return_value=button)
-    tabletop_root.record_action = mocker.Mock(side_effect=lambda *args, **kwargs: order.append("record"))
-    tabletop_root.log_event = mocker.Mock(side_effect=lambda *args, **kwargs: order.append("log"))
+    tabletop_root.record_action = mocker.Mock(
+        side_effect=lambda *args, **kwargs: order.append(("record", None))
+    )
+    def _signal_log_recorder(*_args, **kwargs):
+        order.append(("log", kwargs.get("phase")))
+
+    tabletop_root.log_event = mocker.Mock(side_effect=_signal_log_recorder)
 
     result = SimpleNamespace(
         accepted=True,
@@ -69,7 +84,12 @@ def test_pick_signal_logs_before_button_update(mocker, tabletop_root):
 
     tabletop_root.pick_signal(1, "mittel")
 
-    assert tabletop_root.log_event.call_count == 1
+    assert tabletop_root.log_event.call_count == 2
     assert button.set_pressed_state.call_count == 1
-    assert order[:3] == ["log", "pressed", "record"]
+    assert order[:4] == [
+        ("log", "input_received"),
+        ("log", "action_applied"),
+        ("pressed", None),
+        ("record", None),
+    ]
 
