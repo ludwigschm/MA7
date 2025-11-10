@@ -620,8 +620,8 @@ class TabletopApp(App):
         )
         self._bridge_retry_popup = popup
 
-        retry_button.bind(on_release=lambda *_: self._retry_bridge_connection())
-        cancel_button.bind(on_release=lambda *_: popup.dismiss())
+        retry_button.bind(on_press=lambda *_: self._retry_bridge_connection())
+        cancel_button.bind(on_press=lambda *_: popup.dismiss())
 
         popup.open()
 
