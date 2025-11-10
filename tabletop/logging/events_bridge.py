@@ -16,19 +16,23 @@ _session = requests.Session()
 _client: Optional[PupylabsCloudLogger] = None
 
 
+ALLOWED_KEYS = {
+    "session",
+    "block",
+    "player",
+    "button",
+    "phase",
+    "round_index",
+    "game_player",
+    "player_role",
+    "accepted",
+    "decision",
+    "actor",
+}
+
+
 def _filter_for_cloud(event: Dict[str, Any]) -> Dict[str, Any]:
-    allowed_keys = {
-        "session",
-        "log",
-        "player",
-        "session_id",
-        "round_index",
-        "phase",
-        "actor",
-        "action",
-        "payload",
-    }
-    return {k: v for k, v in event.items() if k in allowed_keys}
+    return {k: v for k, v in event.items() if k in ALLOWED_KEYS}
 
 
 def init_client(
