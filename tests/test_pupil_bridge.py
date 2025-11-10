@@ -68,6 +68,28 @@ def test_recording_start_idempotent(bridge):
     assert device.start_calls == 1
 
 
+def test_recording_label_update_without_restart(bridge):
+    pupil_bridge, device = bridge
+    pupil_bridge.start_recording(1, 1, "VP1")
+    first_label_event = next(
+        event
+        for event in device.events
+        if event[1].get("name") == "recording.label"
+    )
+    assert first_label_event[1]["payload"]["block"] == 1
+
+    pupil_bridge.start_recording(1, 2, "VP1")
+    assert device.start_calls == 1
+
+    updated_label_event = next(
+        event
+        for event in reversed(device.events)
+        if event[1].get("name") == "recording.label"
+    )
+    assert updated_label_event[1]["payload"]["block"] == 2
+    assert pupil_bridge._recording_metadata["VP1"]["block"] == 2
+
+
 def test_time_sync_manager_used_for_offsets(bridge):
     pupil_bridge, device = bridge
     offset = pupil_bridge.estimate_time_offset("VP1")

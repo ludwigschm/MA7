@@ -164,12 +164,6 @@ class _BridgeDeviceClient(DeviceClient):
             )
             if not success:
                 raise RecordingHttpError(503, "recording start failed", transient=True)
-            if label:
-                self._bridge._apply_recording_label(
-                    self._player,
-                    self._device,
-                    label,
-                )
             self._bridge._active_recording[self._player] = True
 
         await asyncio.to_thread(_start)
@@ -1156,12 +1150,11 @@ class PupilBridge:
             log.info("recording.start übersprungen (%s nicht verbunden)", player)
             return
 
-        if self._active_recording.get(player):
-            log.debug("Recording already active for %s", player)
-            return
+        recording_label = self._format_recording_label(session, block, player)
 
-        vp_index = self._PLAYER_INDICES.get(player, 0)
-        recording_label = f"{session}.{block}.{vp_index}"
+        if self._active_recording.get(player):
+            self._update_recording_label(player, device, session, block, recording_label)
+            return
 
         controller = self._recording_controllers.get(player)
         if controller is None:
@@ -1211,7 +1204,50 @@ class PupilBridge:
         }
         self._active_recording[player] = True
         self._recording_metadata[player] = payload
+        self._update_recording_label(player, device, session, block, recording_label)
         self.send_event("session.recording_started", player, payload)
+
+    def is_recording(self, player: str) -> bool:
+        """Return whether the player currently has an active recording."""
+
+        return bool(self._active_recording.get(player))
+
+    def _format_recording_label(self, session: int, block: int, player: str) -> str:
+        vp_index = self._PLAYER_INDICES.get(player, 0)
+        return f"{session}.{block}.{vp_index}"
+
+    def _update_recording_label(
+        self,
+        player: str,
+        device: Any,
+        session: int,
+        block: int,
+        label: str,
+    ) -> None:
+        """Refresh the recording label for an already active recording."""
+
+        log.info(
+            "recording label update requested player=%s label=%s session=%s block=%s",
+            player,
+            label,
+            session,
+            block,
+        )
+        self._apply_recording_label(
+            player,
+            device,
+            label,
+            session=session,
+            block=block,
+        )
+
+        metadata = self._recording_metadata.get(player)
+        if metadata is None:
+            metadata = {"player": player}
+            self._recording_metadata[player] = metadata
+        metadata["session"] = session
+        metadata["block"] = block
+        metadata["recording_label"] = label
 
     def _send_recording_start(
         self,

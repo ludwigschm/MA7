@@ -397,24 +397,24 @@ class TabletopRoot(FloatLayout):
             self._next_bridge_check = now + self._bridge_check_interval
             return
 
-        if (
-            self._bridge_recording_block is not None
-            and block_value != self._bridge_recording_block
-            and self._bridge_recordings_active
-        ):
-            self.stop_bridge_recordings()
-
         players = self._bridge_ready_players()
         if not players:
             self._bridge_state_dirty = True
             self._next_bridge_check = now + self._bridge_check_interval
             return
 
+        block_changed = (
+            self._bridge_recording_block is not None
+            and block_value != self._bridge_recording_block
+            and self._bridge_recordings_active
+        )
+
         for player in players:
-            if player in self._bridge_recordings_active:
+            if player in self._bridge_recordings_active and not block_changed:
                 continue
             self._bridge.start_recording(session_value, block_value, player)
-            self._bridge_recordings_active.add(player)
+            if self._bridge.is_recording(player):
+                self._bridge_recordings_active.add(player)
 
         if self._bridge_recordings_active:
             self._bridge_recording_block = block_value
