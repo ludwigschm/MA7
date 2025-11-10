@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from typing import Any, Dict
 
 import requests
@@ -32,7 +31,6 @@ class PupylabsCloudLogger:
         """Send *event* to the Pupylabs ingest endpoint with retries."""
 
         payload: Dict[str, Any] = dict(event or {})
-        payload.setdefault("event_id", str(uuid.uuid4()))
 
         url = f"{self.base_url}/v1/events/ingest"
         headers = {

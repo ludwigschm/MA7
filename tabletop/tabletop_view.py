@@ -4,11 +4,8 @@ import csv
 import itertools
 import logging
 import os
-import random
 import time
-import uuid
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -46,7 +43,6 @@ from tabletop.state.controller import TabletopController, TabletopState
 from tabletop.state.phases import UXPhase, to_engine_phase
 from tabletop.ui import widgets as ui_widgets
 from tabletop.engine import POINTS_PER_WIN, EventLogger
-from tabletop.sync.reconciler import TimeReconciler
 from tabletop.utils.async_tasks import AsyncCallQueue
 from tabletop.utils.input_timing import Debouncer
 from tabletop.utils.runtime import (
@@ -246,7 +242,7 @@ class TabletopRoot(FloatLayout):
         self._bridge_state_dirty = True
         self._next_bridge_check = 0.0
         self._bridge_check_interval = 0.3
-        self._time_reconciler: Optional[TimeReconciler] = None
+        self._time_reconciler: Optional[Any] = None
         self._heartbeat_event: Optional[Any] = None
         self._heartbeat_interval = 30.0
         self._heartbeat_jitter = 5.0
@@ -344,8 +340,6 @@ class TabletopRoot(FloatLayout):
         self._mark_bridge_dirty()
         self._ensure_bridge_recordings()
         self._ensure_time_reconciler()
-        if self.session_configured:
-            self._schedule_sync_heartbeat(immediate=False)
 
     def _bridge_payload_base(self, *, player: Optional[str] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
@@ -484,20 +478,7 @@ class TabletopRoot(FloatLayout):
         return None
 
     def _ensure_time_reconciler(self) -> None:
-        if self._time_reconciler is not None:
-            return
-        if not self._bridge:
-            return
-        event_logger = self._resolve_event_logger()
-        if event_logger is None:
-            return
-        try:
-            reconciler = TimeReconciler(self._bridge, event_logger)
-        except Exception:
-            log.exception("Zeitabgleich konnte nicht initialisiert werden")
-            return
-        reconciler.start()
-        self._time_reconciler = reconciler
+        self._time_reconciler = None
 
     def _cancel_sync_heartbeat(self) -> None:
         event = self._heartbeat_event
@@ -512,41 +493,10 @@ class TabletopRoot(FloatLayout):
         self._heartbeat_event = None
 
     def _schedule_sync_heartbeat(self, *, immediate: bool = False) -> None:
-        self._ensure_time_reconciler()
-        if not self._bridge:
-            return
-        delay = 0.5 if immediate else self._heartbeat_interval
-        if not immediate:
-            jitter = min(self._heartbeat_jitter, self._heartbeat_interval * 0.25)
-            if jitter > 0:
-                delay = max(1.0, self._heartbeat_interval + random.uniform(-jitter, jitter))
         self._cancel_sync_heartbeat()
-        self._heartbeat_event = Clock.schedule_once(self._emit_sync_heartbeat, delay)
 
     def _emit_sync_heartbeat(self, _dt: float) -> None:
-        payload = {"marker": "hb", "heartbeat_index": self._heartbeat_counter}
-        self._heartbeat_counter += 1
-        try:
-            if self.marker_bridge:
-                # non-blocking: moved bridge send to async enqueue
-                self.marker_bridge.enqueue(self._heartbeat_label, payload)
-            else:
-                self.send_bridge_event(self._heartbeat_label, payload)
-        finally:
-            self._schedule_sync_heartbeat(immediate=False)
-
-    def _notify_event_pipeline(self, name: str) -> None:
-        reconciler = self._time_reconciler
-        if reconciler is None:
-            return
-        try:
-            event_id = str(uuid.uuid4())
-            t_local_ns = time.perf_counter_ns()
-            reconciler.on_event(event_id, t_local_ns)
-            if name.startswith("sync."):
-                reconciler.submit_marker(name, t_local_ns)
-        except Exception:
-            log.debug("Weiterleitung an TimeReconciler fehlgeschlagen", exc_info=True)
+        return
 
     def shutdown_sync_services(self) -> None:
         self._cancel_sync_heartbeat()
@@ -563,7 +513,6 @@ class TabletopRoot(FloatLayout):
     ) -> None:
         if not self._bridge:
             return
-        self._ensure_time_reconciler()
         self._ensure_bridge_recordings()
         players = self._bridge_ready_players()
         if not players:
@@ -592,7 +541,6 @@ class TabletopRoot(FloatLayout):
                     )
                 except Exception:
                     log.exception("Bridge event dispatch failed: %s", name)
-            self._notify_event_pipeline(name)
 
         self._bridge_dispatcher.submit(_dispatch)  # non-blocking: moved to worker
 
@@ -1791,12 +1739,6 @@ class TabletopRoot(FloatLayout):
             payload = {"value": payload}
         actor = self._actor_label(player)
         round_idx = max(0, self.round - 1)
-        if "event_id" not in payload:
-            payload["event_id"] = str(uuid.uuid4())
-        if "t_mono_ns" not in payload:
-            payload["t_mono_ns"] = time.perf_counter_ns()
-        if "t_utc_iso" not in payload:
-            payload["t_utc_iso"] = datetime.now(timezone.utc).isoformat()
         self.logger.log(
             round_idx,
             self.current_engine_phase(),
@@ -1805,24 +1747,34 @@ class TabletopRoot(FloatLayout):
             payload
         )
         write_round_log(self, actor, action, payload, player)
-        base = self._bridge_payload_base(player=None)
-        cloud_event: Dict[str, Any] = {}
-        for key in ("session", "block", "player"):
-            if key in base:
-                cloud_event[key] = base[key]
-        cloud_event["round_index"] = round_idx
-        cloud_event["actor"] = actor
-        if player in (1, 2):
-            cloud_event["game_player"] = player
-            role_value = self.player_roles.get(player)
-            if role_value is not None:
-                cloud_event["player_role"] = role_value
-        for key in ("button", "phase", "accepted", "decision"):
-            if key in payload:
-                cloud_event[key] = payload[key]
-        cloud_event = {
-            k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS
+        ALLOWED = {
+            "session",
+            "block",
+            "player",
+            "button",
+            "phase",
+            "round_index",
+            "game_player",
+            "player_role",
+            "accepted",
+            "decision",
+            "actor",
         }
+        base = self._bridge_payload_base(player=None)
+        cloud_event = {k: base[k] for k in ("session", "block", "player") if k in base}
+        cloud_event.update({
+            "round_index": round_idx,
+            "actor": actor,
+        })
+        if player is not None:
+            cloud_event["game_player"] = player
+        role_value = self.player_roles.get(player)
+        if role_value is not None:
+            cloud_event["player_role"] = role_value
+        for k in ("button", "phase", "accepted", "decision"):
+            if k in payload:
+                cloud_event[k] = payload[k]
+        cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED}
         push_async(cloud_event)
         if self.marker_bridge and action != 'round_start':
             # non-blocking: moved bridge send to async enqueue

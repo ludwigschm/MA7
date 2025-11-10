@@ -1704,11 +1704,7 @@ class PupilBridge:
     def _on_routed_event(self, player: str, event: UIEvent) -> None:
         payload_dict = dict(event.payload or {})
         prepared_payload = self._normalise_event_payload(payload_dict)
-        try:
-            t_ui_ns = int(prepared_payload.get("t_local_ns", 0))
-        except Exception:
-            t_ui_ns = time.perf_counter_ns()
-            prepared_payload["t_local_ns"] = t_ui_ns
+        t_ui_ns = time.perf_counter_ns()
         event_priority: Literal["high", "normal"]
         if event.priority == "high" or event.name.startswith(("sync.", "fix.")):
             event_priority = "high"
@@ -1792,23 +1788,7 @@ class PupilBridge:
         t_host_ns: int,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Emit a host-side timestamp mirror event for sync diagnostics."""
-
-        payload: Dict[str, Any] = {
-            "event_id": event_id,
-            "t_host_ns": int(t_host_ns),
-            "t_local_ns": int(t_host_ns),
-            "origin_player": player,
-            "origin_device": "host_mirror",
-        }
-        if extra:
-            payload.update(extra)
-        self.send_event(
-            "sync.host_ns",
-            player,
-            payload,
-            priority="high",
-        )
+        return
 
     def refine_event(
         self,
@@ -1820,88 +1800,29 @@ class PupilBridge:
         mapping_version: int,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Submit a refinement update for an existing event annotation."""
-
-        payload: Dict[str, Any] = {
-            "event_id": event_id,
-            "t_ref_ns": int(t_ref_ns),
-            "confidence": float(confidence),
-            "mapping_version": int(mapping_version),
-            "refined": True,
-            "provisional": False,
-            "origin_device": "host_ui",
-        }
-        if extra:
-            payload.update(extra)
-
-        response = None
-        try:
-            response = self._post_device_api(
-                player,
-                "/api/annotations/refine",
-                payload,
-                warn=False,
-            )
-        except Exception:  # pragma: no cover - network dependent
-            log.debug("Refinement REST call failed for %s", player, exc_info=True)
-
-        if response is not None and getattr(response, "status_code", None) in {200, 204}:
-            log.debug(
-                "Refinement acknowledged via REST for %s (event %s, v%s)",
-                player,
-                event_id,
-                mapping_version,
-            )
-            return
-
-        log.debug(
-            "Falling back to realtime refine event for %s (event %s, v%s)",
-            player,
-            event_id,
-            mapping_version,
-        )
-        self.send_event("event.refined", player, payload)
+        return
 
     def _normalise_event_payload(
         self, payload: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Ensure mandatory metadata is attached to outgoing event payloads."""
+        """Filter outgoing payloads to contain only whitelisted event keys."""
 
+        allowed = {
+            "session",
+            "block",
+            "player",
+            "button",
+            "phase",
+            "round_index",
+            "game_player",
+            "player_role",
+            "accepted",
+            "decision",
+            "actor",
+        }
         data: Dict[str, Any] = {}
         if isinstance(payload, dict):
-            data.update(payload)
-
-        event_id = data.get("event_id")
-        if not isinstance(event_id, str) or not event_id:
-            event_id = str(uuid.uuid4())
-            data["event_id"] = event_id
-
-        raw_local = data.get("t_local_ns")
-        try:
-            local_ns = int(raw_local)
-        except Exception:
-            local_ns = time.perf_counter_ns()
-        else:
-            if local_ns < 0:
-                local_ns = time.perf_counter_ns()
-        data["t_local_ns"] = local_ns
-
-        provisional = data.get("provisional", True)
-        if isinstance(provisional, str):
-            data["provisional"] = provisional.strip().lower() not in {"false", "0", "no"}
-        else:
-            data["provisional"] = bool(provisional)
-
-        try:
-            mapping_version = int(data.get("mapping_version", 0))
-        except Exception:
-            mapping_version = 0
-        data["mapping_version"] = mapping_version
-
-        origin = data.get("origin_device")
-        if not isinstance(origin, str) or not origin:
-            data["origin_device"] = "host_ui"
-
+            data.update({k: v for k, v in payload.items() if k in allowed})
         return data
 
     # ------------------------------------------------------------------
