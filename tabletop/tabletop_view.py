@@ -8,7 +8,7 @@ import random
 import time
 import uuid
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -28,6 +28,7 @@ from kivy.uix.textinput import TextInput
 from tabletop.data.blocks import load_blocks, load_csv_rounds, value_to_card_path
 from tabletop.data.config import ARUCO_OVERLAY_PATH, ROOT
 from tabletop.logging import async_bridge
+from tabletop.logging.events_bridge import push_async
 from tabletop.logging.events import Events
 from tabletop.logging.round_csv import (
     close_round_log,
@@ -1273,11 +1274,14 @@ class TabletopRoot(FloatLayout):
             widget = self.card_widget_for_player(who, which)
             if widget is None:
                 return
-            widget.flip()
-            if result.record_text:
-                self.record_action(who, result.record_text)
+            # 1) Log zuerst (lokal + async Pupylabs), um Latenz im Lab zu minimieren
             if result.log_action:
                 self.log_event(who, result.log_action, result.log_payload or {})
+            # 2) Danach visuelle Änderung (Flip)
+            widget.flip()
+            # 3) Dann lokale Aktionshistorie
+            if result.record_text:
+                self.record_action(who, result.record_text)
             if result.next_phase:
                 Clock.schedule_once(lambda *_: self.goto(result.next_phase), 0.2)
         finally:
@@ -1299,6 +1303,10 @@ class TabletopRoot(FloatLayout):
             )
             if not result.accepted:
                 return
+            # 1) Log zuerst
+            if result.log_payload:
+                self.log_event(player, 'signal_choice', result.log_payload)
+            # 2) Danach UI-Update
             for lvl, btn_id in self.signal_buttons.get(player, {}).items():
                 btn = self.wid_safe(btn_id)
                 if btn is None:
@@ -1308,9 +1316,8 @@ class TabletopRoot(FloatLayout):
                 else:
                     btn.set_live(False)
                     btn.disabled = True
+            # 3) Aktionslog in der UI
             self.record_action(player, f'Signal gewählt: {self.describe_level(level)}')
-            if result.log_payload:
-                self.log_event(player, 'signal_choice', result.log_payload)
             self.update_user_displays()
             if result.next_phase:
                 Clock.schedule_once(lambda *_: self.goto(result.next_phase), 0.2)
@@ -1794,10 +1801,21 @@ class TabletopRoot(FloatLayout):
     def log_event(self, player: int, action: str, payload=None):
         if not self.logger or not self.session_configured:
             return
-        payload = payload or {}
+        if isinstance(payload, dict):
+            payload = dict(payload)
+        elif payload is None:
+            payload = {}
+        else:
+            payload = {"value": payload}
         actor = self._actor_label(player)
         round_idx = max(0, self.round - 1)
-        self.logger.log(
+        if "event_id" not in payload:
+            payload["event_id"] = str(uuid.uuid4())
+        if "t_mono_ns" not in payload:
+            payload["t_mono_ns"] = time.perf_counter_ns()
+        if "t_utc_iso" not in payload:
+            payload["t_utc_iso"] = datetime.now(timezone.utc).isoformat()
+        log_entry = self.logger.log(
             round_idx,
             self.current_engine_phase(),
             actor,
@@ -1805,17 +1823,24 @@ class TabletopRoot(FloatLayout):
             payload
         )
         write_round_log(self, actor, action, payload, player)
-        bridge_payload = {
-            "actor": actor,
-            "game_player": player,
-            "phase": self.current_engine_phase(),
-            "round_index": round_idx,
-            "payload": payload,
-        }
+        bridge_payload = dict(log_entry)
+        bridge_payload.setdefault("session_id", self.session_id)
+        bridge_payload.update(
+            {
+                "actor": actor,
+                "game_player": player,
+                "payload": payload,
+                "event_id": payload.get("event_id"),
+                "t_mono_ns": payload.get("t_mono_ns"),
+                "t_utc_iso": payload.get("t_utc_iso"),
+            }
+        )
+        bridge_payload["round_index"] = round_idx
         if player in (1, 2):
             role_value = self.player_roles.get(player)
             if role_value is not None:
                 bridge_payload["player_role"] = role_value
+        push_async(bridge_payload)
         if self.marker_bridge and action != 'round_start':
             # non-blocking: moved bridge send to async enqueue
             self.marker_bridge.enqueue(f"action.{action}", bridge_payload)

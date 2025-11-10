@@ -32,6 +32,7 @@ from kivy.lang import Builder
 
 from tabletop.data.config import ARUCO_OVERLAY_PATH
 from tabletop.logging.round_csv import close_round_log, flush_round_log
+from tabletop.logging.events_bridge import init_client as init_pupylabs_client
 from tabletop.overlay.process import (
     OverlayProcess,
     start_overlay,
@@ -49,6 +50,24 @@ from tabletop.utils.runtime import (
 log = logging.getLogger(__name__)
 
 _KV_LOADED = False
+
+_pupylabs_timeout = os.environ.get("PUPYLABS_TIMEOUT_S", "2.0")
+_pupylabs_retries = os.environ.get("PUPYLABS_MAX_RETRIES", "3")
+try:
+    _timeout_value = float(_pupylabs_timeout)
+except (TypeError, ValueError):
+    _timeout_value = 2.0
+try:
+    _retry_value = int(_pupylabs_retries)
+except (TypeError, ValueError):
+    _retry_value = 3
+
+init_pupylabs_client(
+    base_url=os.environ.get("PUPYLABS_BASE_URL", "https://cloud.pupylabs.example"),
+    api_key=os.environ.get("PUPYLABS_API_KEY", ""),
+    timeout_s=_timeout_value,
+    max_retries=_retry_value,
+)
 
 
 class TabletopApp(App):
