@@ -16,6 +16,21 @@ _session = requests.Session()
 _client: Optional[PupylabsCloudLogger] = None
 
 
+def _filter_for_cloud(event: Dict[str, Any]) -> Dict[str, Any]:
+    allowed_keys = {
+        "session",
+        "log",
+        "player",
+        "session_id",
+        "round_index",
+        "phase",
+        "actor",
+        "action",
+        "payload",
+    }
+    return {k: v for k, v in event.items() if k in allowed_keys}
+
+
 def init_client(
     base_url: str,
     api_key: str,
@@ -50,7 +65,8 @@ def push_async(event: Dict[str, Any]) -> None:
 
     def _dispatch() -> None:
         try:
-            _client.send(payload)
+            filtered = _filter_for_cloud(payload)
+            _client.send(filtered)
         except Exception as exc:  # pragma: no cover - defensive
             _log.exception("Failed to push event: %r", exc)
 

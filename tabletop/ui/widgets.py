@@ -2,6 +2,8 @@
 
 import os
 
+from kivy.core.image import Image as CoreImage
+
 from kivy.graphics import PopMatrix, PushMatrix, Rotate
 from kivy.properties import ListProperty, StringProperty
 from kivy.uix.behaviors import ButtonBehavior
@@ -41,6 +43,7 @@ class CardWidget(Button):
         self.live = False
         self.face_up = False
         self.front_image = ASSETS['cards']['back']
+        self._preloaded_tex = None
         self.border = (0, 0, 0, 0)
         self.background_normal = ASSETS['cards']['back_stop']
         self.background_down = ASSETS['cards']['back_stop']
@@ -68,8 +71,16 @@ class CardWidget(Button):
 
     def set_front(self, img_path: str):
         self.front_image = img_path
+        try:
+            self._preloaded_tex = CoreImage(self.front_image).texture
+        except Exception:
+            self._preloaded_tex = None
         if not os.path.exists(img_path):
             self.front_image = ASSETS['cards']['back']
+            try:
+                self._preloaded_tex = CoreImage(self.front_image).texture
+            except Exception:
+                self._preloaded_tex = None
         self.update_visual()
 
     def update_visual(self):
