@@ -56,6 +56,14 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when requests missing
 
     requests = _RequestsShim()  # type: ignore[assignment]
 
+_EPOCH_ANCHOR_MONO_NS = time.monotonic_ns()
+_EPOCH_ANCHOR_UNIX_NS = time.time_ns()
+
+
+def host_monotonic_to_unix_ns(mono_ns: int) -> int:
+    return _EPOCH_ANCHOR_UNIX_NS + (mono_ns - _EPOCH_ANCHOR_MONO_NS)
+
+
 log = logging.getLogger(__name__)
 
 def _reachable(ip: str, port: int, timeout: float = 1.5) -> bool:
@@ -138,6 +146,7 @@ class _QueuedEvent:
     priority: Literal["high", "normal"]
     t_ui_ns: int
     t_enqueue_ns: int
+    use_arrival_time: bool
 
 
 class _BridgeDeviceClient(DeviceClient):
@@ -299,11 +308,12 @@ class PupilBridge:
         self._event_batch_window = event_batch_window_override(0.005)
         self._last_queue_log = 0.0
         self._last_send_log = 0.0
-        self._offset_semantics_warned: set[str] = set()
+        self._offset_anomaly_warned: set[str] = set()
         self._device_registry = DeviceRegistry()
         self._capabilities = CapabilityRegistry()
         self._time_sync: Dict[str, TimeSyncManager] = {}
         self._time_sync_tasks: Dict[str, asyncio.Future[None]] = {}
+        self.time_sync: Optional[TimeSyncManager] = None
         self._recording_controllers: Dict[str, RecordingController] = {}
         self._active_router_player: Optional[str] = None
         self._player_device_id: Dict[str, str] = {}
@@ -1654,24 +1664,44 @@ class PupilBridge:
                 )
                 self._last_send_log = time.monotonic()
 
-    def _dispatch_event(
-        self,
-        name: str,
-        player: str,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def _dispatch_event(self, event: _QueuedEvent) -> None:
         """Send a single event to the device, falling back between APIs."""
+        name = event.name
+        player = event.player
         device = self._device_by_player.get(player)
         if device is None:
             return
 
         event_label = name
         payload_json: Optional[str] = None
-        if payload:
+        prepared_payload: Dict[str, Any] = dict(event.payload or {})
+        include_timestamp = not event.use_arrival_time
+        offset_ns = 0
+        if include_timestamp:
+            offset_ns = self.get_device_offset_ns(player)
+            if abs(offset_ns) > 5_000_000_000:
+                include_timestamp = False
+                if player not in self._offset_anomaly_warned:
+                    log.warning(
+                        "Ignoring large clock offset for %s (offset_ns=%d) – falling back to arrival timestamps",
+                        player,
+                        offset_ns,
+                    )
+                    self._offset_anomaly_warned.add(player)
+        if include_timestamp:
+            mono_now = time.monotonic_ns()
+            host_now_unix_ns = host_monotonic_to_unix_ns(mono_now)
+            prepared_payload["timestamp_ns"] = host_now_unix_ns - offset_ns
+        else:
+            prepared_payload.pop("timestamp_ns", None)
+
+        if prepared_payload:
             try:
-                payload_json = json.dumps(payload, separators=(",", ":"), default=str)
+                payload_json = json.dumps(
+                    prepared_payload, separators=(",", ":"), default=str
+                )
             except TypeError:
-                safe_payload = self._stringify_payload(payload)
+                safe_payload = self._stringify_payload(prepared_payload)
                 payload_json = json.dumps(safe_payload, separators=(",", ":"))
             event_label = f"{name}|{payload_json}"
 
@@ -1685,7 +1715,7 @@ class PupilBridge:
             return
 
         try:
-            device.send_event(name, payload)
+            device.send_event(name, prepared_payload)
         except Exception as exc:  # pragma: no cover - hardware dependent
             log.exception("Failed to send event %s for %s: %s", name, player, exc)
 
@@ -1696,7 +1726,7 @@ class PupilBridge:
 
     def _dispatch_with_metrics(self, event: _QueuedEvent) -> None:
         try:
-            self._dispatch_event(event.name, event.player, event.payload)
+            self._dispatch_event(event)
         finally:
             t_dispatch_ns = time.perf_counter_ns()
             self._log_dispatch_latency(event, t_dispatch_ns)
@@ -1718,6 +1748,7 @@ class PupilBridge:
             priority=event_priority,
             t_ui_ns=int(t_ui_ns),
             t_enqueue_ns=enqueue_ns,
+            use_arrival_time=event.use_arrival_time,
         )
         if self._low_latency_disabled or self._event_queue is None or event_priority == "high":
             self._dispatch_with_metrics(queued)
@@ -1765,6 +1796,7 @@ class PupilBridge:
         payload: Optional[Dict[str, Any]] = None,
         *,
         priority: Literal["high", "normal"] = "normal",
+        use_arrival_time: bool = False,
     ) -> None:
         """Send an event to the player's device, encoding payload as JSON suffix."""
 
@@ -1777,6 +1809,7 @@ class PupilBridge:
             payload=event_payload,
             target=player,
             priority=event_priority,
+            use_arrival_time=use_arrival_time,
         )
         self._event_router.register_player(player)
         self._event_router.route(ui_event)
@@ -1826,6 +1859,27 @@ class PupilBridge:
         return data
 
     # ------------------------------------------------------------------
+    def get_device_offset_ns(self, player: str) -> int:
+        manager = self._time_sync.get(player)
+        if manager is None:
+            injected = getattr(self, "time_sync", None)
+            if isinstance(injected, TimeSyncManager):
+                manager = injected
+        if manager is None:
+            return 0
+        offset_fn = getattr(manager, "get_offset_ns", None)
+        if callable(offset_fn):
+            try:
+                offset_value = int(offset_fn())
+            except Exception:
+                offset_value = 0
+        else:
+            try:
+                offset_value = int(round(-manager.get_offset_s() * 1_000_000_000))
+            except Exception:
+                offset_value = 0
+        return offset_value
+
     def estimate_time_offset(self, player: str) -> Optional[float]:
         """Return device_time - host_time in seconds if available.
 

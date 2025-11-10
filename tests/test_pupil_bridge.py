@@ -1,7 +1,8 @@
+import json
 import math
 import statistics
 from pathlib import Path
-from typing import Tuple
+from typing import Iterator, Tuple
 
 import pytest
 
@@ -36,6 +37,29 @@ class _FakeDevice:
         self.events.append((args, kwargs))
 
 
+def _decoded_events(device: _FakeDevice) -> Iterator[tuple[str, dict]]:
+    for args, kwargs in device.events:
+        if "name" in kwargs:
+            name = str(kwargs.get("name"))
+            payload = dict(kwargs.get("payload", {}) or {})
+            yield name, payload
+            continue
+        if not args:
+            continue
+        first = args[0]
+        if not isinstance(first, str):
+            continue
+        if "|" in first:
+            name, encoded = first.split("|", 1)
+            try:
+                payload = json.loads(encoded)
+            except json.JSONDecodeError:
+                payload = {}
+            yield name, payload
+        else:
+            yield first, {}
+
+
 @pytest.fixture
 def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
     monkeypatch.setattr("tabletop.pupil_bridge._reachable", lambda *_, **__: True)
@@ -56,9 +80,11 @@ def test_event_router_single_target(bridge):
     pupil_bridge, device = bridge
     pupil_bridge.send_event("ui.test", "VP1", {"value": 42})
     pupil_bridge._event_router.flush_all()  # type: ignore[attr-defined]
-    assert device.events
-    args, kwargs = device.events[0]
-    assert args[0].startswith("ui.test")
+    decoded = list(_decoded_events(device))
+    assert decoded
+    name, payload = decoded[0]
+    assert name == "ui.test"
+    assert "timestamp_ns" in payload
 
 
 def test_recording_start_idempotent(bridge):
@@ -72,21 +98,21 @@ def test_recording_label_update_without_restart(bridge):
     pupil_bridge, device = bridge
     pupil_bridge.start_recording(1, 1, "VP1")
     first_label_event = next(
-        event
-        for event in device.events
-        if event[1].get("name") == "recording.label"
+        payload
+        for name, payload in _decoded_events(device)
+        if name == "recording.label"
     )
-    assert first_label_event[1]["payload"]["block"] == 1
+    assert first_label_event["block"] == 1
 
     pupil_bridge.start_recording(1, 2, "VP1")
     assert device.start_calls == 1
 
     updated_label_event = next(
-        event
-        for event in reversed(device.events)
-        if event[1].get("name") == "recording.label"
+        payload
+        for name, payload in reversed(list(_decoded_events(device)))
+        if name == "recording.label"
     )
-    assert updated_label_event[1]["payload"]["block"] == 2
+    assert updated_label_event["block"] == 2
     assert pupil_bridge._recording_metadata["VP1"]["block"] == 2
 
 
