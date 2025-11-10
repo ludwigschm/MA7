@@ -1,14 +1,12 @@
 # Latency & Sync Leitfaden
 
 ## Prioritäten
-- Verwende `priority="high"` für alle `sync.*`- und `fix.*`-Events. Diese Events werden sofort dispatcht und umgehen Batching komplett.
+- Verwende `priority="high"` ausschließlich für `fix.*`-Events. Das einzige `sync.*`-Event (`sync.block.pre`) läuft mit niedriger Priorität, da es nur einmal vor Blockstart gesendet wird.
 - Normale Events laufen über die Batch-Queue (`priority="normal"`). Sie profitieren vom reduzierten Fenster (`~5 ms`) und der Batch-Größe (4 Events).
 
-## Doppel-Marker
-- Kritische Marker werden doppelt gesendet:
-  - Primärmarker (`sync.*`/`fix.*`) mit Gerätestempel.
-  - Host-Spiegel (`sync.host_ns`) mit Host-Timestamp (`t_host_ns`) und derselben `event_id`.
-- Der TimeReconciler verknüpft beide Einträge zu einem Sync-Paar und gewichtet diese stärker als reguläre Offset-Samples.
+## Sync-Strategie
+- Herzschlag- und Host-Syncs sind deaktiviert. Geräte erhalten einmalig vor jedem Block ein `sync.block.pre` Event mit Session- und Block-ID.
+- Die verbleibenden `fix.*`-Marker folgen unverändert dem High-Priority-Pfad.
 
 ## RMS & Confidence
 - Die Mapping-Logs enthalten `rms=…`, `rms_ns=…`, `samples`, `slope_mode`, `offset_sign` und `confidence`.
