@@ -333,6 +333,7 @@ class PupilBridge:
     def connect(self) -> bool:
         """Discover or configure devices and map them to configured players."""
 
+        self.ready.clear()
         configured_players = {
             player for player, cfg in self._device_config.items() if cfg.is_configured
         }
@@ -551,6 +552,8 @@ class PupilBridge:
                 )
             if not cfg.device_id:
                 cfg.device_id = device_id
+            if not self.ready.is_set():
+                self.ready.set()
             return device_id
 
         if module_serial:
@@ -566,6 +569,8 @@ class PupilBridge:
                 "Konfigurierte device_id %s konnte nicht bestätigt werden.", expected_hex
             )
 
+        if not self.ready.is_set():
+            self.ready.set()
         return module_serial or ""
 
     def _auto_start_recording(self, player: str, device: Any) -> None:
@@ -619,8 +624,6 @@ class PupilBridge:
         self._recording_controllers[player] = self._build_recording_controller(
             player, device, cfg
         )
-        if not self.ready.is_set():
-            self.ready.set()
         self._probe_capabilities(player, cfg, device_id)
 
     def _setup_time_sync(self, player: str, device_id: str, device: Any) -> None:
