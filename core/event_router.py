@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, Deque, Dict, Literal, Sequence
 
-__all__ = ["Priority", "UIEvent", "EventRouter", "classify_event"]
+__all__ = ["Priority", "UIEvent", "EventRouter", "classify_event", "debounce"]
 
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,83 @@ class UIEvent:
     use_arrival_time: bool = False
 
 
+def debounce(name_pattern: str, window_ms: int) -> Callable[[Callable[..., object]], Callable[..., object]]:
+    """Coalesce matching events occurring within ``window_ms`` milliseconds."""
+
+    pattern = re.compile(name_pattern)
+    window_s = max(0.0, window_ms / 1000.0)
+
+    def decorator(func: Callable[..., object]) -> Callable[..., object]:
+        attr_state = f"_{func.__name__}_debounce_state_{hash(pattern.pattern)}"
+        attr_lock = f"{attr_state}_lock"
+
+        @functools.wraps(func)
+        def wrapper(self, event: UIEvent, *args, **kwargs):  # type: ignore[override]
+            if not isinstance(event, UIEvent):
+                return func(self, event, *args, **kwargs)
+
+            candidate_name = event.name
+            if pattern.match(candidate_name):
+                matched = True
+            elif "." in candidate_name:
+                prefix = candidate_name.split(".", 1)[0] + "."
+                matched = bool(pattern.match(prefix))
+            else:
+                matched = False
+
+            if not matched:
+                return func(self, event, *args, **kwargs)
+
+            if window_s <= 0:
+                return func(self, event, *args, **kwargs)
+
+            state: Dict[tuple[object, ...], threading.Timer] = getattr(self, attr_state, None)
+            if state is None:
+                state = {}
+                setattr(self, attr_state, state)
+
+            lock: threading.Lock = getattr(self, attr_lock, None)
+            if lock is None:
+                lock = threading.Lock()
+                setattr(self, attr_lock, lock)
+
+            key = (
+                event.name,
+                event.target,
+                event.broadcast,
+                event.priority,
+                event.use_arrival_time,
+            )
+            call_args = args
+            call_kwargs = dict(kwargs)
+
+            timer: threading.Timer | None = None
+
+            def dispatch() -> None:
+                with lock:
+                    current = state.get(key)
+                    if current is not timer:
+                        return
+                    state.pop(key, None)
+                func(self, event, *call_args, **call_kwargs)
+
+            with lock:
+                existing = state.get(key)
+                if existing is not None:
+                    existing.cancel()
+                    if hasattr(self, "events_coalesced_total"):
+                        self.events_coalesced_total += 1  # type: ignore[attr-defined]
+                timer = threading.Timer(window_s, dispatch)
+                state[key] = timer
+                timer.daemon = True
+                timer.start()
+            return None
+
+        return wrapper
+
+    return decorator
+
+
 class EventRouter:
     """Route events to devices with optional batching to limit traffic."""
 
@@ -74,6 +152,7 @@ class EventRouter:
         self._lock = threading.Lock()
         self.events_high_total = 0
         self.events_normal_total = 0
+        self.events_coalesced_total = 0
         self.normal_batches_total = 0
         self.max_queue_depth_normal = 0
         self._last_drop_log_ts = 0.0
@@ -128,6 +207,7 @@ class EventRouter:
         self.register_player(player)
         self._active_player = player
 
+    @debounce("^(tap\\.|click\\.|next_round_click)$", window_ms=20)
     def route(self, event: UIEvent) -> None:
         targets = self._select_targets(event)
         if not targets:
