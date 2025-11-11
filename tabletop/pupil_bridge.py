@@ -20,6 +20,8 @@ from core.event_router import EventRouter, UIEvent
 from core.recording import DeviceClient, RecordingController, RecordingHttpError
 from core.time_sync import TimeSyncManager
 
+from core.http_client import get_sync_session
+
 try:  # pragma: no cover - optional dependency
     from pupil_labs.realtime_api.simple import (
         Device,
@@ -31,33 +33,15 @@ except Exception:  # pragma: no cover - optional dependency
     discover_devices = None  # type: ignore[assignment]
     discover_one_device = None  # type: ignore[assignment]
 
-try:  # pragma: no cover - optional dependency
-    import requests
-except ModuleNotFoundError:  # pragma: no cover - fallback when requests missing
-    from urllib import request as _urllib_request
-    from urllib.error import HTTPError
-
-    class _ShimResponse:
-        def __init__(self, ok: bool) -> None:
-            self.ok = ok
-
-    class _RequestsShim:
-        @staticmethod
-        def get(url: str, timeout: float = 1.5) -> _ShimResponse:
-            try:
-                with _urllib_request.urlopen(url, timeout=timeout) as response:
-                    status = getattr(response, "status", 200)
-                    ok = 200 <= int(status) < 400
-            except HTTPError as exc:  # pragma: no cover - network dependent
-                ok = 200 <= exc.code < 400
-            except Exception as exc:  # pragma: no cover - network dependent
-                raise exc
-            return _ShimResponse(ok)
-
-    requests = _RequestsShim()  # type: ignore[assignment]
+from requests import Response
 
 _EPOCH_ANCHOR_MONO_NS = time.monotonic_ns()
 _EPOCH_ANCHOR_UNIX_NS = time.time_ns()
+
+
+_HTTP_SESSION = get_sync_session()
+_JSON_HEADERS = {"Content-Type": "application/json"}
+_REST_START_PAYLOAD = json.dumps({"action": "START"}, separators=(",", ":"))
 
 
 def host_monotonic_to_unix_ns(mono_ns: int) -> int:
@@ -68,7 +52,9 @@ log = logging.getLogger(__name__)
 
 def _reachable(ip: str, port: int, timeout: float = 1.5) -> bool:
     try:
-        response = requests.get(f"http://{ip}:{port}/api/status", timeout=timeout)
+        response = _HTTP_SESSION.get(
+            f"http://{ip}:{port}/api/status", timeout=timeout
+        )
         return bool(response.ok)
     except Exception:
         return False
@@ -530,7 +516,7 @@ class PupilBridge:
         if status is None and cfg.ip and cfg.port is not None:
             url = f"http://{cfg.ip}:{cfg.port}/api/status"
             try:
-                response = requests.get(url, timeout=self._connect_timeout)
+                response = _HTTP_SESSION.get(url, timeout=self._connect_timeout)
                 response.raise_for_status()
                 status = response.json()
             except Exception as exc:
@@ -707,7 +693,7 @@ class PupilBridge:
         if cfg.ip and cfg.port is not None:
             url = f"http://{cfg.ip}:{cfg.port}/api/frame_name"
             try:
-                response = requests.options(url, timeout=self._http_timeout)
+                response = _HTTP_SESSION.options(url, timeout=self._http_timeout)
             except Exception:
                 supported = False
             else:
@@ -1319,31 +1305,50 @@ class PupilBridge:
         log.error("No recording start method succeeded for %s", player)
         return False, None
 
-    def _start_recording_via_rest(self, player: str) -> tuple[Optional[Union[str, bool]], Optional[Any]]:
-        if requests is None:
-            log.debug("requests not available – cannot start recording via REST (%s)", player)
-            return False, None
+    def _start_recording_via_rest(
+        self, player: str
+    ) -> tuple[Optional[Union[str, bool]], Optional[Any]]:
         cfg = self._device_config.get(player)
         if cfg is None or not cfg.ip or cfg.port is None:
             log.debug("REST recording start skipped (%s: no IP/port)", player)
             return False, None
 
         url = f"http://{cfg.ip}:{cfg.port}/api/recording"
-        try:
-            response = requests.post(
-                url,
-                json={"action": "START"},
-                timeout=self._http_timeout,
-            )
-        except Exception as exc:  # pragma: no cover - network dependent
-            log.error("REST recording start failed for %s: %s", player, exc)
-            return False, None
-
-        if response.status_code == 200:
+        response: Optional[Response] = None
+        last_exc: Optional[Exception] = None
+        delay = 0.05
+        attempts = 3
+        for attempt in range(attempts):
             try:
-                return True, response.json()
-            except ValueError:
-                return True, None
+                response = _HTTP_SESSION.post(
+                    url,
+                    data=_REST_START_PAYLOAD,
+                    headers=_JSON_HEADERS,
+                    timeout=self._http_timeout,
+                )
+            except Exception as exc:  # pragma: no cover - network dependent
+                last_exc = exc
+                response = None
+            else:
+                status = response.status_code
+                if status == 200:
+                    try:
+                        return True, response.json()
+                    except ValueError:
+                        return True, None
+                if 500 <= status < 600 and attempt < attempts - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                break
+            if attempt < attempts - 1:
+                time.sleep(delay)
+                delay *= 2
+
+        if response is None:
+            if last_exc is not None:
+                log.error("REST recording start failed for %s: %s", player, last_exc)
+            return False, None
 
         message: Optional[str] = None
         try:
@@ -1416,16 +1421,7 @@ class PupilBridge:
         *,
         timeout: Optional[float] = None,
         warn: bool = True,
-    ) -> Optional[Any]:
-        if requests is None:
-            if warn:
-                log.warning(
-                    "requests not available – cannot contact %s for %s",
-                    path,
-                    player,
-                )
-            return None
-
+    ) -> Optional[Response]:
         cfg = self._device_config.get(player)
         if cfg is None or not cfg.ip or cfg.port is None:
             if warn:
@@ -1440,28 +1436,51 @@ class PupilBridge:
         effective_timeout = timeout or self._http_timeout
         delay = 0.05
         attempts = 3
+        last_exc: Optional[Exception] = None
+        try:
+            payload_json = json.dumps(payload, separators=(",", ":"), default=str)
+        except TypeError:
+            safe_payload = self._stringify_payload(payload)
+            payload_json = json.dumps(safe_payload, separators=(",", ":"))
+
+        response: Optional[Response] = None
         for attempt in range(attempts):
             try:
-                return requests.post(
+                response = _HTTP_SESSION.post(
                     url,
-                    json=payload,
+                    data=payload_json,
+                    headers=_JSON_HEADERS,
                     timeout=effective_timeout,
                 )
             except Exception as exc:  # pragma: no cover - network dependent
-                if attempt == attempts - 1:
-                    if warn:
-                        log.warning("HTTP POST %s failed for %s: %s", url, player, exc)
-                    else:
-                        log.debug(
-                            "HTTP POST %s failed for %s: %s",
-                            url,
-                            player,
-                            exc,
-                            exc_info=True,
-                        )
-                else:
-                    time.sleep(delay)
-                    delay *= 2
+                last_exc = exc
+                response = None
+            else:
+                if response is not None and 500 <= response.status_code < 600:
+                    if attempt < attempts - 1:
+                        time.sleep(delay)
+                        delay *= 2
+                        continue
+                return response
+
+            if attempt < attempts - 1:
+                time.sleep(delay)
+                delay *= 2
+
+        if response is not None:
+            return response
+
+        if warn:
+            message = last_exc if last_exc is not None else "no response"
+            log.warning("HTTP POST %s failed for %s: %s", url, player, message)
+        else:
+            log.debug(
+                "HTTP POST %s failed for %s: %s",
+                url,
+                player,
+                last_exc if last_exc is not None else "no response",
+                exc_info=last_exc is not None,
+            )
         return None
 
     def _apply_recording_label(
