@@ -12,7 +12,7 @@ __all__ = ["DeviceCapabilities", "CapabilityRegistry"]
 class DeviceCapabilities:
     """Feature flags describing optional device behaviour."""
 
-    frame_name_supported: bool = False
+    supports_frame_name: bool = False
 
 
 class CapabilityRegistry:

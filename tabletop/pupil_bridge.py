@@ -44,6 +44,18 @@ _JSON_HEADERS = {"Content-Type": "application/json"}
 _REST_START_PAYLOAD = json.dumps({"action": "START"}, separators=(",", ":"))
 
 
+def is_transient(status_code: int) -> bool:
+    return status_code in (502, 503, 504)
+
+
+def _response_preview(response: Response) -> str:
+    try:
+        body = response.text
+    except Exception:
+        return ""
+    return (body or "")[:120]
+
+
 def host_monotonic_to_unix_ns(mono_ns: int) -> int:
     return _EPOCH_ANCHOR_UNIX_NS + (mono_ns - _EPOCH_ANCHOR_MONO_NS)
 
@@ -695,18 +707,47 @@ class PupilBridge:
         self, player: str, cfg: NeonDeviceConfig, device_id: str
     ) -> None:
         identifier = device_id or player
-        supported = False
+        supports_frame_name = False
         if cfg.ip and cfg.port is not None:
-            url = f"http://{cfg.ip}:{cfg.port}/api/frame_name"
+            url = f"http://{cfg.ip}:{cfg.port}/api/capabilities"
+            response: Optional[Response] = None
             try:
-                response = _HTTP_SESSION.options(url, timeout=self._http_timeout)
-            except Exception:
-                supported = False
+                response = _HTTP_SESSION.head(url, timeout=self._http_timeout)
+            except Exception as exc:
+                log.debug(
+                    "Capabilities probe failed for %s endpoint=%s: %s",
+                    player,
+                    url,
+                    exc,
+                )
             else:
-                supported = response.status_code in {200, 204}
-        caps = DeviceCapabilities(frame_name_supported=supported)
+                if response.status_code == 405:
+                    try:
+                        response = _HTTP_SESSION.get(
+                            url, timeout=self._http_timeout
+                        )
+                    except Exception as exc:
+                        log.debug(
+                            "Capabilities probe GET failed for %s endpoint=%s: %s",
+                            player,
+                            url,
+                            exc,
+                        )
+                        response = None
+            if response is not None:
+                status = response.status_code
+                if status in (200, 204):
+                    supports_frame_name = True
+                elif 400 <= status < 500:
+                    log.info(
+                        "Capabilities probe client error endpoint=%s status=%s body=%s",
+                        url,
+                        status,
+                        _response_preview(response),
+                    )
+        caps = DeviceCapabilities(supports_frame_name=supports_frame_name)
         self._capabilities.set(identifier, caps)
-        if not supported:
+        if not supports_frame_name:
             log.info("frame_name skipped (unsupported) device=%s", player)
 
     def _get_device_status(self, device: Any) -> Optional[Any]:
@@ -1342,7 +1383,7 @@ class PupilBridge:
                         return True, response.json()
                     except ValueError:
                         return True, None
-                if 500 <= status < 600 and attempt < attempts - 1:
+                if is_transient(status) and attempt < attempts - 1:
                     time.sleep(delay)
                     delay *= 2
                     continue
@@ -1364,19 +1405,27 @@ class PupilBridge:
         except ValueError:
             message = response.text
 
+        status = response.status_code
         if (
-            response.status_code == 400
+            status == 400
             and message
             and "previous recording not completed" in message.lower()
         ):
-            log.warning("Recording start busy for %s: %s", player, message)
+            log.warning(
+                "Recording start busy player=%s endpoint=%s status=%s body=%s",
+                player,
+                response.url,
+                status,
+                _response_preview(response),
+            )
             return "busy", None
 
         log.error(
-            "REST recording start for %s failed (%s): %s",
+            "REST recording start failed player=%s endpoint=%s status=%s body=%s",
             player,
-            response.status_code,
-            message or response.text,
+            response.url,
+            status,
+            _response_preview(response),
         )
         return False, None
 
@@ -1406,9 +1455,11 @@ class PupilBridge:
                 stopped = True
             elif response is not None:
                 log.warning(
-                    "REST recording STOP for %s failed (%s)",
+                    "REST recording stop failed player=%s endpoint=%s status=%s body=%s",
                     player,
+                    response.url,
                     response.status_code,
+                    _response_preview(response),
                 )
 
         if not stopped:
@@ -1462,7 +1513,7 @@ class PupilBridge:
                 last_exc = exc
                 response = None
             else:
-                if response is not None and 500 <= response.status_code < 600:
+                if response is not None and is_transient(response.status_code):
                     if attempt < attempts - 1:
                         time.sleep(delay)
                         delay *= 2
@@ -1503,22 +1554,7 @@ class PupilBridge:
 
         identifier = self._player_device_id.get(player, "") or player
         caps = self._capabilities.get(identifier)
-        if caps.frame_name_supported:
-            response = self._post_device_api(
-                player,
-                "/api/frame_name",
-                {"frame_name": label},
-                warn=False,
-            )
-            if response is None:
-                log.warning("Setting frame_name failed for %s (no response)", player)
-            elif response.status_code != 200:
-                log.warning(
-                    "Setting frame_name failed for %s (%s)",
-                    player,
-                    response.status_code,
-                )
-        else:
+        if not caps.supports_frame_name:
             log.debug("frame_name skipped (unsupported) device=%s", player)
 
         payload: Dict[str, Any] = {"label": label}
