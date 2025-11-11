@@ -5,32 +5,118 @@ from __future__ import annotations
 import asyncio
 import logging
 import statistics
+import threading
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from .logging import get_logger
 
-__all__ = ["TimeSyncManager", "TimeSyncSampleError"]
+__all__ = [
+    "AtomicRef",
+    "OffsetState",
+    "TimeSyncManager",
+    "TimeSyncSampleError",
+    "get_offset_ns",
+    "get_offset_ns_for_event",
+    "get_rms_ms",
+    "get_state",
+    "should_swap",
+]
+
+RESYNC_INTERVAL_S = 30
+DRIFT_THRESHOLD_S = 0.002
+MAX_SAMPLES = 64
+RMS_REFINE_THRESHOLD_S = 0.0015
+ABSURD_OFFSET_NS = 5_000_000_000
 
 
 class TimeSyncSampleError(RuntimeError):
     """Raised when a time synchronisation measurement fails."""
 
 
-@dataclass(slots=True)
-class _SyncState:
-    offset_s: float = 0.0
-    last_sync_ts: float = 0.0
-    sample_count: int = 0
+@dataclass(frozen=True)
+class OffsetState:
+    median_ns: int
+    rms_ns: int
+    seq: int
+    updated_at_mono_ns: int
+
+
+class AtomicRef:
+    """A minimal atomic reference relying on the GIL for readers."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+        self._lock = threading.Lock()
+
+    def load(self) -> Any:
+        return self._value
+
+    def store(self, value: Any) -> None:
+        with self._lock:
+            self._value = value
+
+
+_offset_state = AtomicRef(
+    OffsetState(
+        median_ns=0,
+        rms_ns=0,
+        seq=0,
+        updated_at_mono_ns=time.monotonic_ns(),
+    )
+)
+_absurd_logged = AtomicRef(False)
+
+
+def get_state() -> OffsetState:
+    """Return the current immutable offset state."""
+
+    return _offset_state.load()
+
+
+def get_offset_ns() -> int:
+    """Return the current median offset in nanoseconds without blocking."""
+
+    state = _offset_state.load()
+    offset = state.median_ns
+    if abs(offset) > ABSURD_OFFSET_NS:
+        if not _absurd_logged.load():
+            _absurd_logged.store(True)
+            logger = get_logger("core.time_sync")
+            logger.warning("TimeSync: absurd offset detected offset_ns=%d", offset)
+        return 0
+    return offset
+
+
+def get_rms_ms() -> float:
+    """Return the RMS jitter in milliseconds."""
+
+    return _offset_state.load().rms_ns / 1_000_000.0
+
+
+def should_swap(old: OffsetState, new: OffsetState) -> bool:
+    """Determine whether a newly measured state should replace the old one."""
+
+    if old.seq == 0:
+        return True
+    drift_threshold_ns = int(DRIFT_THRESHOLD_S * 1_000_000_000)
+    rms_threshold_ns = int(RMS_REFINE_THRESHOLD_S * 1_000_000_000)
+    if abs(new.median_ns - old.median_ns) > drift_threshold_ns:
+        return True
+    if new.rms_ns > rms_threshold_ns:
+        return True
+    return False
 
 
 class TimeSyncManager:
-    """Maintain a smoothed estimate of the device-to-host time offset.
+    """Continuously estimate device-to-host time offset without blocking readers.
 
-    The manager calls the provided :func:`measure_fn` to obtain multiple offset
-    samples (in seconds).  The returned offset ``offset_s`` is defined such that
-    ``host_time = device_time - offset_s``.
+    Readers (event senders) observe the offset via :func:`get_offset_ns`, which
+    performs a single atomic snapshot without acquiring locks.  Writers (resync
+    tasks) replace the shared :class:`OffsetState` atomically after completing a
+    full measurement cycle, ensuring event logging remains non-blocking even
+    during resynchronisation.
     """
 
     def __init__(
@@ -38,110 +124,156 @@ class TimeSyncManager:
         device_id: str,
         measure_fn: Callable[[int, float], Awaitable[list[float]]],
         *,
-        max_samples: int = 20,
+        max_samples: int = MAX_SAMPLES,
         sample_timeout: float = 0.25,
-        resync_interval_s: int = 120,
-        drift_threshold_s: float = 0.005,
+        resync_interval_s: float = RESYNC_INTERVAL_S,
+        drift_threshold_s: float = DRIFT_THRESHOLD_S,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.device_id = device_id
         self._measure_fn = measure_fn
         self.max_samples = max_samples
         self.sample_timeout = sample_timeout
-        self.resync_interval_s = resync_interval_s
-        self.drift_threshold_s = drift_threshold_s
-        self._state = _SyncState()
-        self._lock = asyncio.Lock()
         self._log = logger or get_logger(f"core.time_sync.{device_id}")
+        self._lock = asyncio.Lock()
+        self._resync_task: Optional[asyncio.Task[None]] = None
+        self._stopped = asyncio.Event()
+        self.resync_interval_s = float(resync_interval_s)
+        self.drift_threshold_s = float(drift_threshold_s)
+
+    def get_offset_ns(self) -> int:
+        return get_offset_ns()
 
     def get_offset_s(self) -> float:
-        """Return the most recent offset estimate."""
+        return self.get_offset_ns() / 1_000_000_000.0
 
-        return self._state.offset_s
+    async def start(self) -> None:
+        """Kick off the continuous resynchronisation loop."""
+
+        await self.force_resync()
+        self._ensure_loop_running()
+
+    async def stop(self) -> None:
+        """Stop the resynchronisation loop."""
+
+        self._stopped.set()
+        if self._resync_task:
+            self._resync_task.cancel()
+            try:
+                await self._resync_task
+            except asyncio.CancelledError:
+                pass
+            self._resync_task = None
 
     async def initial_sync(self) -> float:
-        """Perform the initial synchronisation and return the offset."""
+        """Perform the first synchronisation pass and start background updates."""
 
-        async with self._lock:
-            return await self._sync_locked(reason="initial")
+        median_ns, _ = await self.force_resync()
+        self._ensure_loop_running()
+        return median_ns / 1_000_000_000.0
 
     async def maybe_resync(self, observed_drift_s: float | None = None) -> float:
-        """Re-synchronise when the interval or drift threshold is exceeded."""
+        """Compatibility helper that triggers a resync when drift exceeds thresholds."""
 
-        now = time.monotonic()
-        state = self._state
-        if state.last_sync_ts and (now - state.last_sync_ts) < self.resync_interval_s:
-            if observed_drift_s is None or abs(observed_drift_s) <= self.drift_threshold_s:
-                return state.offset_s
+        state = _offset_state.load()
+        now_ns = time.monotonic_ns()
+        if observed_drift_s is not None and abs(observed_drift_s) <= self.drift_threshold_s:
+            return state.median_ns / 1_000_000_000.0
+        if (
+            observed_drift_s is None
+            and (now_ns - state.updated_at_mono_ns) < int(self.resync_interval_s * 1_000_000_000)
+        ):
+            return state.median_ns / 1_000_000_000.0
+        median_ns, _ = await self.force_resync()
+        return median_ns / 1_000_000_000.0
+
+    async def force_resync(self) -> tuple[int, int]:
+        """Perform a synchronisation pass immediately.
+
+        Returns
+        -------
+        tuple[int, int]
+            The (median_ns, rms_ns) from the most recent successful measurement.
+        """
 
         async with self._lock:
-            if state.last_sync_ts and (time.monotonic() - state.last_sync_ts) < self.resync_interval_s:
-                if observed_drift_s is None or abs(observed_drift_s) <= self.drift_threshold_s:
-                    return state.offset_s
-            return await self._sync_locked(reason="resync")
+            try:
+                new_state, sample_count = await self._collect_state()
+            except TimeSyncSampleError as exc:
+                self._log.warning(
+                    "TimeSync: device=%s status=failed error=%s",
+                    self.device_id,
+                    exc,
+                )
+                state = _offset_state.load()
+                return state.median_ns, state.rms_ns
 
-    async def _sync_locked(self, *, reason: str) -> float:
+            old_state = _offset_state.load()
+            if should_swap(old_state, new_state):
+                _offset_state.store(new_state)
+                if abs(new_state.median_ns) <= ABSURD_OFFSET_NS:
+                    _absurd_logged.store(False)
+                median_ms = new_state.median_ns / 1_000_000.0
+                rms_ms = new_state.rms_ns / 1_000_000.0
+                self._log.info(
+                    "TimeSync: device=%s median_offset=%.3fms rms=%.3fms samples=%d",
+                    self.device_id,
+                    median_ms,
+                    rms_ms,
+                    sample_count,
+                )
+            return new_state.median_ns, new_state.rms_ns
+
+    async def _run_resync_loop(self) -> None:
         try:
-            samples = await self._measure_fn(self.max_samples, self.sample_timeout)
+            while not self._stopped.is_set():
+                await asyncio.sleep(self.resync_interval_s)
+                try:
+                    await self.force_resync()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # pragma: no cover - network dependent
+                    self._log.exception("TimeSync: background resync failed")
+        except asyncio.CancelledError:
+            pass
+
+    async def _collect_state(self) -> tuple[OffsetState, int]:
+        try:
+            raw_samples = await self._measure_fn(self.max_samples, self.sample_timeout)
         except asyncio.CancelledError:  # pragma: no cover - defensive
             raise
         except Exception as exc:  # pragma: no cover - network dependent
-            self._log.warning("time_sync device=%s reason=%s status=failed error=%s", self.device_id, reason, exc)
-            return self._state.offset_s
+            raise TimeSyncSampleError(str(exc)) from exc
 
-        filtered = [float(sample) for sample in samples if isinstance(sample, (int, float))]
-        if not filtered:
-            self._log.warning(
-                "time_sync device=%s reason=%s status=empty", self.device_id, reason
-            )
-            return self._state.offset_s
+        samples = [float(sample) for sample in raw_samples if isinstance(sample, (int, float))]
+        if not samples:
+            raise TimeSyncSampleError("no valid samples")
 
-        offset_s = statistics.median(filtered)
-        if len(filtered) >= 3:
-            try:
-                variance = _biweight_midvariance(filtered)
-            except Exception:  # pragma: no cover - numerical edge case
-                variance = None
-        else:
-            variance = None
+        if len(samples) > self.max_samples:
+            samples = samples[: self.max_samples]
+        if len(samples) > 20:
+            samples = samples[:20]
 
-        self._state = _SyncState(
-            offset_s=offset_s,
-            last_sync_ts=time.monotonic(),
-            sample_count=len(filtered),
+        offsets_ns = [int(sample * 1_000_000_000) for sample in samples]
+        median_ns = int(statistics.median(offsets_ns))
+        mean_square = statistics.fmean((sample - median_ns) ** 2 for sample in offsets_ns)
+        rms_ns = int(mean_square ** 0.5)
+        old_state = _offset_state.load()
+        new_state = OffsetState(
+            median_ns=median_ns,
+            rms_ns=rms_ns,
+            seq=old_state.seq + 1,
+            updated_at_mono_ns=time.monotonic_ns(),
         )
-        if variance is None:
-            self._log.info(
-                "time_sync device=%s offset_s=%.6f samples=%d method=median",
-                self.device_id,
-                offset_s,
-                len(filtered),
-            )
-        else:
-            self._log.info(
-                "time_sync device=%s offset_s=%.6f samples=%d method=median variance=%.9f",
-                self.device_id,
-                offset_s,
-                len(filtered),
-                variance,
-            )
-        return offset_s
+        return new_state, len(offsets_ns)
+
+    def _ensure_loop_running(self) -> None:
+        if self._resync_task is None or self._resync_task.done():
+            self._stopped.clear()
+            self._resync_task = asyncio.create_task(self._run_resync_loop())
 
 
-def _biweight_midvariance(samples: list[float]) -> float:
-    """Robust variance estimate based on Tukey's biweight."""
+def get_offset_ns_for_event() -> int:
+    """Backwards-compatible alias for event senders."""
 
-    median = statistics.median(samples)
-    mad = statistics.median(abs(x - median) for x in samples)
-    if mad == 0:
-        return 0.0
-    c = 9.0
-    weights = []
-    for value in samples:
-        u = (value - median) / (c * mad)
-        if abs(u) >= 1:
-            continue
-        weights.append((value - median) ** 2 * (1 - u**2) ** 4)
-    if not weights:
-        return 0.0
-    return sum(weights) / (len(weights) * (mad**2))
+    return get_offset_ns()
