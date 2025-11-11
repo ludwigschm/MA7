@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import logging
-import os
 import re
 import threading
 import time
@@ -12,6 +11,8 @@ from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, Deque, Dict, Literal, Sequence
+
+from .config import EVENT_NORMAL_BATCH_INTERVAL_S, EVENT_NORMAL_MAX_BATCH
 
 __all__ = ["Priority", "UIEvent", "EventRouter", "classify_event", "debounce"]
 
@@ -162,31 +163,14 @@ class EventRouter:
         if normal_max_batch is None and max_batch is not None:
             normal_max_batch = max_batch
 
-        env_interval = os.getenv("EVENT_ROUTER_NORMAL_BATCH_INTERVAL_S")
-        if normal_batch_interval_s is None and env_interval:
-            try:
-                normal_batch_interval_s = float(env_interval)
-            except ValueError:
-                log.warning(
-                    "Invalid EVENT_ROUTER_NORMAL_BATCH_INTERVAL_S=%s", env_interval
-                )
-        env_max_batch = os.getenv("EVENT_ROUTER_NORMAL_MAX_BATCH")
-        if normal_max_batch is None and env_max_batch:
-            try:
-                normal_max_batch = int(env_max_batch)
-            except ValueError:
-                log.warning(
-                    "Invalid EVENT_ROUTER_NORMAL_MAX_BATCH=%s", env_max_batch
-                )
-
         if normal_batch_interval_s is None:
-            normal_batch_interval_s = 0.006
+            normal_batch_interval_s = EVENT_NORMAL_BATCH_INTERVAL_S
         self._normal_batch_interval_s = min(
             0.008, max(0.005, float(normal_batch_interval_s))
         )
 
         if normal_max_batch is None:
-            normal_max_batch = 6
+            normal_max_batch = EVENT_NORMAL_MAX_BATCH
         self._normal_max_batch = max(4, min(8, int(normal_max_batch)))
 
     def register_player(self, player: str) -> None:

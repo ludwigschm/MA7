@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
+from .config import TIMESYNC_DRIFT_THRESHOLD_MS, TIMESYNC_RESYNC_INTERVAL_S
 from .logging import get_logger
 
 __all__ = [
@@ -24,8 +25,8 @@ __all__ = [
     "should_swap",
 ]
 
-RESYNC_INTERVAL_S = 30
-DRIFT_THRESHOLD_S = 0.002
+RESYNC_INTERVAL_S = float(TIMESYNC_RESYNC_INTERVAL_S)
+DRIFT_THRESHOLD_S = float(TIMESYNC_DRIFT_THRESHOLD_MS) / 1000.0
 MAX_SAMPLES = 64
 RMS_REFINE_THRESHOLD_S = 0.0015
 ABSURD_OFFSET_NS = 5_000_000_000
