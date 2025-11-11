@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-import requests
-
+from core.http_client import get_sync_session
 from tabletop.logging.async_bridge import enqueue
 from tabletop.logging.pupylabs_cloud import PupylabsCloudLogger
 
@@ -12,7 +11,7 @@ __all__ = ["init_client", "push_async"]
 
 _log = logging.getLogger(__name__)
 
-_session = requests.Session()
+_session = get_sync_session()
 _client: Optional[PupylabsCloudLogger] = None
 
 
