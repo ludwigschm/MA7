@@ -9,7 +9,9 @@ def test_routes_only_to_active_device():
     def deliver(player: str, event: UIEvent) -> None:
         deliveries.append((player, event.name))
 
-    router = EventRouter(deliver, batch_interval_s=0.01, max_batch=8)
+    router = EventRouter(
+        deliver, normal_batch_interval_s=0.01, normal_max_batch=8
+    )
     router.register_player("VP1")
     router.register_player("VP2")
     router.set_active_player("VP1")
@@ -27,7 +29,9 @@ def test_batching_flushes_periodically():
     def deliver(player: str, event: UIEvent) -> None:
         deliveries.append((player, event.name))
 
-    router = EventRouter(deliver, batch_interval_s=0.01, max_batch=4)
+    router = EventRouter(
+        deliver, normal_batch_interval_s=0.01, normal_max_batch=4
+    )
     router.set_active_player("VP1")
     router.route(UIEvent(name="a"))
     router.route(UIEvent(name="b"))
