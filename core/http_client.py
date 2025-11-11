@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Optional
 
-import httpx
 import requests
 from requests import Session
 from requests.adapters import HTTPAdapter
 
+try:  # pragma: no cover - optional dependency
+    import httpx  # type: ignore
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+    httpx = None  # type: ignore[assignment]
+    _HTTPX_IMPORT_ERROR = exc
+else:  # pragma: no cover - optional dependency
+    _HTTPX_IMPORT_ERROR = None
+
 from .config import HTTP_CONNECT_TIMEOUT_S, HTTP_MAX_CONNECTIONS
 
-_ASYNC_CLIENT: Optional[httpx.AsyncClient] = None
+log = logging.getLogger(__name__)
+
+if httpx is None:  # pragma: no cover - optional dependency
+    log.warning(
+        "httpx is not installed; asynchronous HTTP support is disabled. "
+        "Install the 'httpx' extra to enable async APIs.",
+    )
+
+_ASYNC_CLIENT: Optional["httpx.AsyncClient"] = None
 _ASYNC_LOCK = threading.Lock()
 
 _SYNC_SESSION: Optional[Session] = None
@@ -36,13 +52,29 @@ class _TimeoutHTTPAdapter(HTTPAdapter):
         return super().send(request, **kwargs)
 
 
-def get_async_client() -> httpx.AsyncClient:
+def _ensure_async_support() -> None:
+    """Validate that the optional :mod:`httpx` dependency is available."""
+
+    if httpx is None:
+        message = (
+            "httpx is not available; install the 'httpx' extra to enable async HTTP "
+            "operations"
+        )
+        if _HTTPX_IMPORT_ERROR is not None:
+            raise RuntimeError(message) from _HTTPX_IMPORT_ERROR
+        raise RuntimeError(message)
+
+
+def get_async_client() -> "httpx.AsyncClient":
     """Return the shared :class:`httpx.AsyncClient` instance."""
+
+    _ensure_async_support()
 
     global _ASYNC_CLIENT
     if _ASYNC_CLIENT is None:
         with _ASYNC_LOCK:
             if _ASYNC_CLIENT is None:
+                assert httpx is not None  # Narrow type for mypy/pyright
                 _ASYNC_CLIENT = httpx.AsyncClient(
                     timeout=httpx.Timeout(
                         connect=HTTP_CONNECT_TIMEOUT_S,

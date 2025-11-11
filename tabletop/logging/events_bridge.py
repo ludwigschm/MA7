@@ -47,13 +47,20 @@ def init_client(
         _log.debug("Pupylabs client disabled (missing configuration)")
         _client = None
         return
-    _client = PupylabsCloudLogger(
-        _session,
-        base_url,
-        api_key,
-        timeout_s,
-        max_retries,
-    )
+    try:
+        _client = PupylabsCloudLogger(
+            _session,
+            base_url,
+            api_key,
+            timeout_s,
+            max_retries,
+        )
+    except Exception as exc:  # pragma: no cover - initialization safety
+        _log.warning(
+            "Pupylabs client disabled after initialization failure: %s", exc,
+        )
+        _client = None
+        return
     _log.info("Pupylabs client initialized for %s", base_url)
 
 
