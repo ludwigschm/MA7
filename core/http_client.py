@@ -10,6 +10,8 @@ import requests
 from requests import Session
 from requests.adapters import HTTPAdapter
 
+from .config import HTTP_CONNECT_TIMEOUT_S, HTTP_MAX_CONNECTIONS
+
 _ASYNC_CLIENT: Optional[httpx.AsyncClient] = None
 _ASYNC_LOCK = threading.Lock()
 
@@ -20,7 +22,12 @@ _SYNC_LOCK = threading.Lock()
 class _TimeoutHTTPAdapter(HTTPAdapter):
     """HTTP adapter that injects default timeouts when not provided."""
 
-    def __init__(self, *args: object, timeout: float | tuple[float, float] = 0.5, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        timeout: float | tuple[float, float] = HTTP_CONNECT_TIMEOUT_S,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._timeout = timeout
 
@@ -37,10 +44,15 @@ def get_async_client() -> httpx.AsyncClient:
         with _ASYNC_LOCK:
             if _ASYNC_CLIENT is None:
                 _ASYNC_CLIENT = httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=0.5, read=0.5, write=0.5, pool=1.0),
+                    timeout=httpx.Timeout(
+                        connect=HTTP_CONNECT_TIMEOUT_S,
+                        read=HTTP_CONNECT_TIMEOUT_S,
+                        write=HTTP_CONNECT_TIMEOUT_S,
+                        pool=1.0,
+                    ),
                     limits=httpx.Limits(
-                        max_keepalive_connections=8,
-                        max_connections=8,
+                        max_keepalive_connections=HTTP_MAX_CONNECTIONS,
+                        max_connections=HTTP_MAX_CONNECTIONS,
                         keepalive_expiry=30.0,
                     ),
                     http2=True,
@@ -57,10 +69,10 @@ def get_sync_session() -> Session:
             if _SYNC_SESSION is None:
                 session = requests.Session()
                 adapter = _TimeoutHTTPAdapter(
-                    pool_connections=8,
-                    pool_maxsize=8,
+                    pool_connections=HTTP_MAX_CONNECTIONS,
+                    pool_maxsize=HTTP_MAX_CONNECTIONS,
                     max_retries=0,
-                    timeout=(0.5, 0.5),
+                    timeout=(HTTP_CONNECT_TIMEOUT_S, HTTP_CONNECT_TIMEOUT_S),
                 )
                 session.mount("http://", adapter)
                 session.mount("https://", adapter)
