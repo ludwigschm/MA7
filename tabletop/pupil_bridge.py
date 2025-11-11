@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Literal, Optional, Union
 
+import metrics
 from core.capabilities import CapabilityRegistry, DeviceCapabilities
 from core.device_registry import DeviceRegistry
 from core.event_router import EventRouter, UIEvent
@@ -1502,6 +1503,7 @@ class PupilBridge:
 
         response: Optional[Response] = None
         for attempt in range(attempts):
+            should_retry = False
             try:
                 response = _HTTP_SESSION.post(
                     url,
@@ -1512,20 +1514,28 @@ class PupilBridge:
             except Exception as exc:  # pragma: no cover - network dependent
                 last_exc = exc
                 response = None
+                should_retry = True
             else:
-                if response is not None and is_transient(response.status_code):
-                    if attempt < attempts - 1:
-                        time.sleep(delay)
-                        delay *= 2
-                        continue
-                return response
+                status = response.status_code
+                labels = {"player": player, "path": path}
+                if 500 <= status < 600:
+                    metrics.inc("http_5xx_total", **labels)
+                elif 400 <= status < 500:
+                    metrics.inc("http_4xx_total", **labels)
+                if is_transient(status) and attempt < attempts - 1:
+                    should_retry = True
+                    response = None
+                else:
+                    return response
 
-            if attempt < attempts - 1:
+            if should_retry and attempt < attempts - 1:
+                metrics.inc("http_retries_total", player=player, path=path)
                 time.sleep(delay)
                 delay *= 2
+                continue
 
-        if response is not None:
-            return response
+            if response is not None:
+                return response
 
         if warn:
             message = last_exc if last_exc is not None else "no response"

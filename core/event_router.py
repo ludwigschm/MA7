@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, Deque, Dict, Literal, Sequence
 
+import metrics
+
 from .config import EVENT_NORMAL_BATCH_INTERVAL_S, EVENT_NORMAL_MAX_BATCH
 
 __all__ = ["Priority", "UIEvent", "EventRouter", "classify_event", "debounce"]
@@ -118,6 +120,7 @@ def debounce(name_pattern: str, window_ms: int) -> Callable[[Callable[..., objec
                     existing.cancel()
                     if hasattr(self, "events_coalesced_total"):
                         self.events_coalesced_total += 1  # type: ignore[attr-defined]
+                        metrics.inc("events_coalesced_total")
                 timer = threading.Timer(window_s, dispatch)
                 state[key] = timer
                 timer.daemon = True
@@ -203,9 +206,11 @@ class EventRouter:
             for target in targets:
                 if priority is Priority.HIGH:
                     self.events_high_total += 1
+                    metrics.inc("events_high_total")
                     high_jobs.append((target, event))
                     continue
                 self.events_normal_total += 1
+                metrics.inc("events_normal_total")
                 queue = self._normal_queues.setdefault(target, deque())
                 queue.append(event)
                 queue_len = len(queue)

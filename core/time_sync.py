@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
+import metrics
 from .config import TIMESYNC_DRIFT_THRESHOLD_MS, TIMESYNC_RESYNC_INTERVAL_S
 from .logging import get_logger
 
@@ -216,6 +217,16 @@ class TimeSyncManager:
                     _absurd_logged.store(False)
                 median_ms = new_state.median_ns / 1_000_000.0
                 rms_ms = new_state.rms_ns / 1_000_000.0
+                metrics.gauge(
+                    "timesync_rms_ms",
+                    rms_ms,
+                    device=self.device_id,
+                )
+                metrics.gauge(
+                    "timesync_samples",
+                    float(sample_count),
+                    device=self.device_id,
+                )
                 self._log.info(
                     "TimeSync: device=%s median_offset=%.3fms rms=%.3fms samples=%d",
                     self.device_id,
