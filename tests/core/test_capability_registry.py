@@ -4,10 +4,10 @@ from core.capabilities import CapabilityRegistry, DeviceCapabilities
 def test_caps_cached_and_mutable():
     registry = CapabilityRegistry()
     caps = registry.get("devA")
-    assert caps.frame_name_supported is False
+    assert caps.supports_frame_name is False
 
-    updated = DeviceCapabilities(frame_name_supported=True)
+    updated = DeviceCapabilities(supports_frame_name=True)
     registry.set("devA", updated)
     cached = registry.get("devA")
-    assert cached.frame_name_supported is True
-    assert registry.get("devB").frame_name_supported is False
+    assert cached.supports_frame_name is True
+    assert registry.get("devB").supports_frame_name is False
