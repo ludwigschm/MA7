@@ -295,6 +295,7 @@ class PupilBridge:
         self._last_queue_log = 0.0
         self._last_send_log = 0.0
         self._offset_anomaly_warned: set[str] = set()
+        self.ready = threading.Event()
         self._device_registry = DeviceRegistry()
         self._capabilities = CapabilityRegistry()
         self._time_sync: Dict[str, TimeSyncManager] = {}
@@ -618,6 +619,8 @@ class PupilBridge:
         self._recording_controllers[player] = self._build_recording_controller(
             player, device, cfg
         )
+        if not self.ready.is_set():
+            self.ready.set()
         self._probe_capabilities(player, cfg, device_id)
 
     def _setup_time_sync(self, player: str, device_id: str, device: Any) -> None:
@@ -1823,6 +1826,19 @@ class PupilBridge:
         event_priority: Literal["high", "normal"] = (
             "high" if priority == "high" else "normal"
         )
+        if not self.ready.is_set():
+            if event_priority == "high":
+                if not self.ready.wait(0.25):
+                    log.warning(
+                        "PupilBridge not ready; dropping HIGH event: %s", name
+                    )
+                    return
+            else:
+                log.warning(
+                    "PupilBridge not ready; dropping NORMAL event: %s", name
+                )
+                return
+        assert self.ready.is_set()
         ui_event = UIEvent(
             name=name,
             payload=event_payload,
