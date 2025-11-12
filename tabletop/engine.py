@@ -201,7 +201,7 @@ class EventLogger:
                 """
         CREATE TABLE IF NOT EXISTS events(
           session_id TEXT, round_idx INT, phase TEXT, actor TEXT, action TEXT,
-          payload TEXT, t_mono_ns INTEGER, t_utc_iso TEXT
+          payload TEXT, t_ns INTEGER, t_utc_iso TEXT
         )"""
             )
             self.conn.execute(
@@ -217,6 +217,7 @@ class EventLogger:
           PRIMARY KEY (event_id, player)
         )"""
             )
+            self._ensure_timestamp_schema()
             self._ensure_refinement_schema()
             self.conn.commit()
         self._csv_path: Optional[pathlib.Path] = None
@@ -245,6 +246,15 @@ class EventLogger:
             )
             self._writer_thread.start()
         atexit.register(self.close)
+
+    def _ensure_timestamp_schema(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(events)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "t_ns" not in columns and "t_mono_ns" in columns:
+            log.info("Migrating events table to use t_ns epoch timestamps")
+            self.conn.execute("ALTER TABLE events RENAME COLUMN t_mono_ns TO t_ns")
+            self.conn.commit()
 
     def _ensure_refinement_schema(self) -> None:
         cur = self.conn.cursor()
@@ -364,7 +374,7 @@ class EventLogger:
         action: str,
         payload: Dict[str, Any],
         *,
-        t_mono_ns: int,
+        t_ns: int,
         t_utc_iso: str,
         blocking: bool = False,
     ) -> Dict[str, Any]:
@@ -375,7 +385,7 @@ class EventLogger:
             actor,
             action,
             json.dumps(payload, ensure_ascii=False),
-            t_mono_ns,
+            t_ns,
             t_utc_iso,
         )
         if (not blocking) and self._use_async and self._event_queue is not None:
@@ -480,7 +490,7 @@ class EventLogger:
             cur = self.conn.cursor()
             cur.execute(
                 """
-        SELECT session_id, round_idx, phase, actor, action, payload, t_mono_ns, t_utc_iso
+        SELECT session_id, round_idx, phase, actor, action, payload, t_ns, t_utc_iso
         FROM events
         WHERE payload LIKE ?
         """,
@@ -502,7 +512,7 @@ class EventLogger:
                     "actor": row[3],
                     "action": row[4],
                     "payload": payload_obj,
-                    "t_mono_ns": row[6],
+                    "t_ns": row[6],
                     "t_utc_iso": row[7],
                 }
             )

@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Optional
 import metrics
 from .config import TIMESYNC_DRIFT_THRESHOLD_MS, TIMESYNC_RESYNC_INTERVAL_S
 from .logging import get_logger
+from .clock import now_ns, now_mono_ns
 
 __all__ = [
     "AtomicRef",
@@ -46,7 +47,7 @@ class OffsetState:
     median_ns: int
     rms_ns: int
     seq: int
-    updated_at_mono_ns: int
+    updated_at_ns: int
 
 
 @dataclass(frozen=True)
@@ -76,9 +77,10 @@ _offset_state = AtomicRef(
         median_ns=0,
         rms_ns=0,
         seq=0,
-        updated_at_mono_ns=time.monotonic_ns(),
+        updated_at_ns=now_ns(),
     )
 )
+_last_update_mono_ns = AtomicRef(now_mono_ns())
 _absurd_logged = AtomicRef(False)
 _health_state = AtomicRef(
     HealthState(
@@ -207,12 +209,15 @@ class TimeSyncManager:
         """Compatibility helper that triggers a resync when drift exceeds thresholds."""
 
         state = _offset_state.load()
-        now_ns = time.monotonic_ns()
+        now_mono = now_mono_ns()
         if observed_drift_s is not None and abs(observed_drift_s) <= self.drift_threshold_s:
             return state.median_ns / 1_000_000_000.0
         if (
             observed_drift_s is None
-            and (now_ns - state.updated_at_mono_ns) < int(self.resync_interval_s * 1_000_000_000)
+            and (
+                now_mono - _last_update_mono_ns.load()
+                < int(self.resync_interval_s * 1_000_000_000)
+            )
         ):
             return state.median_ns / 1_000_000_000.0
         median_ns, _ = await self.force_resync()
@@ -326,8 +331,9 @@ class TimeSyncManager:
             median_ns=median_ns,
             rms_ns=rms_ns,
             seq=old_state.seq + 1,
-            updated_at_mono_ns=time.monotonic_ns(),
+            updated_at_ns=now_ns(),
         )
+        _last_update_mono_ns.store(now_mono_ns())
         return new_state, len(offsets_ns)
 
     def _ensure_loop_running(self) -> None:

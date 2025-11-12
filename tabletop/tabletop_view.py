@@ -24,6 +24,7 @@ from kivy.uix.spinner import Spinner
 from kivy.uix.switch import Switch
 from kivy.uix.textinput import TextInput
 
+from core.clock import now_ns
 from tabletop.data.blocks import load_blocks, load_csv_rounds, value_to_card_path
 from tabletop.data.config import ARUCO_OVERLAY_PATH, ROOT
 from tabletop.logging import async_bridge
@@ -662,7 +663,7 @@ class TabletopRoot(FloatLayout):
         *,
         event_id: str,
         phase: str,
-        t_mono_ns: int,
+        t_ns: int,
         t_utc_iso: str,
         blocking: bool,
         marker: str,
@@ -674,7 +675,7 @@ class TabletopRoot(FloatLayout):
                 payload,
                 event_id=event_id,
                 phase=phase,
-                t_mono_ns=t_mono_ns,
+                t_ns=t_ns,
                 t_utc_iso=t_utc_iso,
                 blocking=blocking,
             )
@@ -1188,7 +1189,7 @@ class TabletopRoot(FloatLayout):
         started = time.perf_counter()
         try:
             event_id = str(uuid.uuid4())
-            t_mono_ns = time.monotonic_ns()
+            t_ns = now_ns()
             t_utc_iso = datetime.utcnow().isoformat()
             blocking = self._strict_logging_enabled()
             allowed_press = self._input_debouncer.allow(
@@ -1223,7 +1224,7 @@ class TabletopRoot(FloatLayout):
                 input_payload,
                 event_id=event_id,
                 phase="input_received",
-                t_mono_ns=t_mono_ns,
+                t_ns=t_ns,
                 t_utc_iso=t_utc_iso,
                 blocking=blocking,
                 marker="INPUT_LOGGED_BEFORE_LOGIC",
@@ -1265,7 +1266,7 @@ class TabletopRoot(FloatLayout):
                         outcome_payload,
                         event_id=event_id,
                         phase="action_applied",
-                        t_mono_ns=time.monotonic_ns(),
+                        t_ns=now_ns(),
                         t_utc_iso=datetime.utcnow().isoformat(),
                         blocking=blocking,
                         marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1287,7 +1288,7 @@ class TabletopRoot(FloatLayout):
                             outcome_payload,
                             event_id=event_id,
                             phase="action_applied",
-                            t_mono_ns=time.monotonic_ns(),
+                            t_ns=now_ns(),
                             t_utc_iso=datetime.utcnow().isoformat(),
                             blocking=blocking,
                             marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1308,7 +1309,7 @@ class TabletopRoot(FloatLayout):
                         outcome_payload,
                         event_id=event_id,
                         phase="action_applied",
-                        t_mono_ns=time.monotonic_ns(),
+                        t_ns=now_ns(),
                         t_utc_iso=datetime.utcnow().isoformat(),
                         blocking=blocking,
                         marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1325,7 +1326,7 @@ class TabletopRoot(FloatLayout):
                         outcome_payload,
                         event_id=event_id,
                         phase="action_applied",
-                        t_mono_ns=time.monotonic_ns(),
+                        t_ns=now_ns(),
                         t_utc_iso=datetime.utcnow().isoformat(),
                         blocking=blocking,
                         marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1341,7 +1342,7 @@ class TabletopRoot(FloatLayout):
                     outcome_payload,
                     event_id=event_id,
                     phase="action_applied",
-                    t_mono_ns=time.monotonic_ns(),
+                    t_ns=now_ns(),
                     t_utc_iso=datetime.utcnow().isoformat(),
                     blocking=blocking,
                     marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1356,7 +1357,7 @@ class TabletopRoot(FloatLayout):
                 outcome_payload,
                 event_id=event_id,
                 phase="action_applied",
-                t_mono_ns=time.monotonic_ns(),
+                t_ns=now_ns(),
                 t_utc_iso=datetime.utcnow().isoformat(),
                 blocking=blocking,
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1386,7 +1387,7 @@ class TabletopRoot(FloatLayout):
         started = time.perf_counter()
         try:
             event_id = str(uuid.uuid4())
-            t_mono_ns = time.monotonic_ns()
+            t_ns = now_ns()
             t_utc_iso = datetime.utcnow().isoformat()
             blocking = self._strict_logging_enabled()
             allowed_press = self._input_debouncer.allow(f"tap:{who}:{which}")
@@ -1401,7 +1402,7 @@ class TabletopRoot(FloatLayout):
                 input_payload,
                 event_id=event_id,
                 phase="input_received",
-                t_mono_ns=t_mono_ns,
+                t_ns=t_ns,
                 t_utc_iso=t_utc_iso,
                 blocking=blocking,
                 marker="INPUT_LOGGED_BEFORE_LOGIC",
@@ -1428,7 +1429,7 @@ class TabletopRoot(FloatLayout):
                 outcome_payload,
                 event_id=event_id,
                 phase="action_applied",
-                t_mono_ns=time.monotonic_ns(),
+                t_ns=now_ns(),
                 t_utc_iso=datetime.utcnow().isoformat(),
                 blocking=blocking,
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1459,7 +1460,7 @@ class TabletopRoot(FloatLayout):
         started = time.perf_counter()
         try:
             event_id = str(uuid.uuid4())
-            t_mono_ns = time.monotonic_ns()
+            t_ns = now_ns()
             t_utc_iso = datetime.utcnow().isoformat()
             blocking = self._strict_logging_enabled()
             allowed_press = self._input_debouncer.allow(f"signal:{player}:{level}")
@@ -1474,7 +1475,7 @@ class TabletopRoot(FloatLayout):
                 input_payload,
                 event_id=event_id,
                 phase="input_received",
-                t_mono_ns=t_mono_ns,
+                t_ns=t_ns,
                 t_utc_iso=t_utc_iso,
                 blocking=blocking,
                 marker="INPUT_LOGGED_BEFORE_LOGIC",
@@ -1498,7 +1499,7 @@ class TabletopRoot(FloatLayout):
                 outcome_payload,
                 event_id=event_id,
                 phase="action_applied",
-                t_mono_ns=time.monotonic_ns(),
+                t_ns=now_ns(),
                 t_utc_iso=datetime.utcnow().isoformat(),
                 blocking=blocking,
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -1535,7 +1536,7 @@ class TabletopRoot(FloatLayout):
         started = time.perf_counter()
         try:
             event_id = str(uuid.uuid4())
-            t_mono_ns = time.monotonic_ns()
+            t_ns = now_ns()
             t_utc_iso = datetime.utcnow().isoformat()
             blocking = self._strict_logging_enabled()
             allowed_press = self._input_debouncer.allow(f"decision:{player}:{decision}")
@@ -1550,7 +1551,7 @@ class TabletopRoot(FloatLayout):
                 input_payload,
                 event_id=event_id,
                 phase="input_received",
-                t_mono_ns=t_mono_ns,
+                t_ns=t_ns,
                 t_utc_iso=t_utc_iso,
                 blocking=blocking,
                 marker="INPUT_LOGGED_BEFORE_LOGIC",
@@ -1574,7 +1575,7 @@ class TabletopRoot(FloatLayout):
                 outcome_payload,
                 event_id=event_id,
                 phase="action_applied",
-                t_mono_ns=time.monotonic_ns(),
+                t_ns=now_ns(),
                 t_utc_iso=datetime.utcnow().isoformat(),
                 blocking=blocking,
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
@@ -2066,7 +2067,7 @@ class TabletopRoot(FloatLayout):
         *,
         event_id: Optional[str] = None,
         phase: str = "action_applied",
-        t_mono_ns: Optional[int] = None,
+        t_ns: Optional[int] = None,
         t_utc_iso: Optional[str] = None,
         blocking: Optional[bool] = None,
     ):
@@ -2092,7 +2093,7 @@ class TabletopRoot(FloatLayout):
             "payload": payload_dict,
             "event_id": event_id,
             "phase": phase,
-            "t_mono_ns": t_mono_ns,
+            "t_ns": t_ns,
             "t_utc_iso": t_utc_iso,
         }
         if player is not None:

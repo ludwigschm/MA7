@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from tabletop.engine import EventLogger, Phase as EnginePhase
+from core.clock import now_ns
 
 __all__ = ["Events", "EnginePhase"]
 
@@ -60,10 +60,13 @@ class Events:
         if "player" in payload and payload["player"] is not None:
             data_payload.setdefault("player", payload["player"])
 
-        t_mono_ns = payload.get("t_mono_ns")
+        t_ns = payload.get("t_ns")
+        if t_ns is None:
+            # Backwards compatibility for legacy payloads.
+            t_ns = payload.get("t_mono_ns")
         t_utc_iso = payload.get("t_utc_iso")
-        if t_mono_ns is None:
-            t_mono_ns = time.monotonic_ns()
+        if t_ns is None:
+            t_ns = now_ns()
         if t_utc_iso is None:
             t_utc_iso = datetime.utcnow().isoformat()
 
@@ -74,7 +77,7 @@ class Events:
             actor,
             action,
             data_payload,
-            t_mono_ns=t_mono_ns,
+            t_ns=t_ns,
             t_utc_iso=t_utc_iso,
             blocking=effective_blocking,
         )
@@ -87,7 +90,7 @@ class Events:
         action: str,
         payload: Optional[Dict[str, Any]] = None,
         *,
-        t_mono_ns: Optional[int] = None,
+        t_ns: Optional[int] = None,
         t_utc_iso: Optional[str] = None,
         blocking: bool = False,
     ) -> Dict[str, Any]:
@@ -101,8 +104,8 @@ class Events:
             "action": action,
             "payload": payload or {},
         }
-        if t_mono_ns is not None:
-            event_payload["t_mono_ns"] = t_mono_ns
+        if t_ns is not None:
+            event_payload["t_ns"] = t_ns
         if t_utc_iso is not None:
             event_payload["t_utc_iso"] = t_utc_iso
         return self.log_event(event_payload, blocking=blocking)
