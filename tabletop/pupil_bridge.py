@@ -11,7 +11,6 @@ import queue
 import re
 import threading
 import time
-import uuid
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -63,11 +62,10 @@ def device_key_from(status_ip: str, status_port: int, device_id: str | None) -> 
 
 log = logging.getLogger(__name__)
 
+
 def _reachable(ip: str, port: int, timeout: float = 1.5) -> bool:
     try:
-        response = _HTTP_SESSION.get(
-            f"http://{ip}:{port}/api/status", timeout=timeout
-        )
+        response = _HTTP_SESSION.get(f"http://{ip}:{port}/api/status", timeout=timeout)
         return bool(response.ok)
     except Exception:
         return False
@@ -223,6 +221,7 @@ class _BridgeDeviceClient(DeviceClient):
 
         await asyncio.to_thread(_cancel)
 
+
 def _load_device_config(path: Path) -> Dict[str, NeonDeviceConfig]:
     configs: Dict[str, NeonDeviceConfig] = {
         "VP1": NeonDeviceConfig("VP1"),
@@ -296,9 +295,13 @@ class PupilBridge:
         config_file = config_path or CONFIG_PATH
         _ensure_config_file(config_file)
         self._device_config = _load_device_config(config_file)
-        mapping_src = device_mapping if device_mapping is not None else self.DEFAULT_MAPPING
+        mapping_src = (
+            device_mapping if device_mapping is not None else self.DEFAULT_MAPPING
+        )
         self._device_key_to_player: Dict[str, str] = {
-            str(device_id).lower(): player for device_id, player in mapping_src.items() if player
+            str(device_id).lower(): player
+            for device_id, player in mapping_src.items()
+            if player
         }
         self._connect_timeout = float(connect_timeout)
         self._http_timeout = max(0.1, min(0.3, float(connect_timeout)))
@@ -415,7 +418,9 @@ class PupilBridge:
                 identity = self._validate_device_identity(device, cfg)
             except Exception as exc:  # pragma: no cover - hardware dependent
                 if player == "VP1":
-                    raise RuntimeError(f"VP1 konnte nicht verbunden werden: {exc}") from exc
+                    raise RuntimeError(
+                        f"VP1 konnte nicht verbunden werden: {exc}"
+                    ) from exc
                 log.error("Verbindung zu VP2 fehlgeschlagen: %s", exc)
                 success = False
                 continue
@@ -433,23 +438,34 @@ class PupilBridge:
             self._auto_start_recording(player, device)
 
         if "VP1" in configured_players and self._device_by_player.get("VP1") is None:
-            raise RuntimeError("VP1 ist konfiguriert, konnte aber nicht verbunden werden.")
+            raise RuntimeError(
+                "VP1 ist konfiguriert, konnte aber nicht verbunden werden."
+            )
         return success and (self._device_by_player.get("VP1") is not None)
 
     def _connect_device_with_retries(self, player: str, cfg: NeonDeviceConfig) -> Any:
         delays = [1.0, 1.5, 2.0]
         last_error: Optional[BaseException] = None
         for attempt in range(1, 4):
-            log.info("Verbinde mit ip=%s, port=%s (Versuch %s/3)", cfg.ip, cfg.port, attempt)
+            log.info(
+                "Verbinde mit ip=%s, port=%s (Versuch %s/3)", cfg.ip, cfg.port, attempt
+            )
             try:
                 device = self._connect_device_once(cfg)
                 return self._ensure_device_connection(device)
             except Exception as exc:
                 last_error = exc
-                log.error("Verbindungsversuch %s/3 für %s fehlgeschlagen: %s", attempt, player, exc)
+                log.error(
+                    "Verbindungsversuch %s/3 für %s fehlgeschlagen: %s",
+                    attempt,
+                    player,
+                    exc,
+                )
                 if attempt < 3:
                     time.sleep(delays[attempt - 1])
-        raise last_error if last_error else RuntimeError("Unbekannter Verbindungsfehler")
+        raise (
+            last_error if last_error else RuntimeError("Unbekannter Verbindungsfehler")
+        )
 
     def _connect_device_once(self, cfg: NeonDeviceConfig) -> Any:
         assert Device is not None  # guarded by caller
@@ -476,9 +492,7 @@ class PupilBridge:
             return Device(address=ip, port=port)
         except Exception as exc:
             first_error = exc
-            log.error(
-                "Direkte Verbindung zu %s:%s fehlgeschlagen: %s", ip, port, exc
-            )
+            log.error("Direkte Verbindung zu %s:%s fehlgeschlagen: %s", ip, port, exc)
             if discover_one_device is None and discover_devices is None:
                 raise
 
@@ -544,7 +558,9 @@ class PupilBridge:
                 except Exception:
                     log.debug("%s() schlug fehl beim Aufräumen", attr, exc_info=True)
 
-    def _validate_device_identity(self, device: Any, cfg: NeonDeviceConfig) -> DeviceIdentity:
+    def _validate_device_identity(
+        self, device: Any, cfg: NeonDeviceConfig
+    ) -> DeviceIdentity:
         status = self._get_device_status(device, cfg.player)
         if status is None and cfg.ip and cfg.port is not None:
             url = f"http://{cfg.ip}:{cfg.port}/api/status"
@@ -590,11 +606,16 @@ class PupilBridge:
             return DeviceIdentity(device_id=device_id, module_serial=module_serial)
 
         if module_serial:
-            log.info("Kein device_id im Status, nutze module_serial=%s (cfg=%s)", module_serial, cfg_display)
+            log.info(
+                "Kein device_id im Status, nutze module_serial=%s (cfg=%s)",
+                module_serial,
+                cfg_display,
+            )
 
         if expected_hex and not device_id:
             log.warning(
-                "Konfigurierte device_id %s konnte nicht bestätigt werden.", expected_hex
+                "Konfigurierte device_id %s konnte nicht bestätigt werden.",
+                expected_hex,
             )
 
         if not device_id:
@@ -631,7 +652,9 @@ class PupilBridge:
         )
         return candidate
 
-    def _resolve_device_key(self, cfg: NeonDeviceConfig, identity: DeviceIdentity) -> str:
+    def _resolve_device_key(
+        self, cfg: NeonDeviceConfig, identity: DeviceIdentity
+    ) -> str:
         port = cfg.port if cfg.port is not None else 0
         base_key = device_key_from(cfg.ip or "", int(port), identity.device_id)
         return self._assign_device_key(base_key)
@@ -735,9 +758,7 @@ class PupilBridge:
         logger = logging.getLogger(f"{__name__}.recording.{player.lower()}")
         return RecordingController(client, logger)
 
-    def _probe_capabilities(
-        self, player: str, device: Any, device_key: str
-    ) -> None:
+    def _probe_capabilities(self, player: str, device: Any, device_key: str) -> None:
         status_payload = self._latest_status_payload(player)
         if status_payload is None:
             status_payload = self._pull_status_payload_from_device(player, device)
@@ -846,7 +867,9 @@ class PupilBridge:
             return None
         return None
 
-    def _get_device_status(self, device: Any, player: Optional[str] = None) -> Optional[Any]:
+    def _get_device_status(
+        self, device: Any, player: Optional[str] = None
+    ) -> Optional[Any]:
         for attr in ("api_status", "status", "get_status"):
             status_fn = getattr(device, attr, None)
             if not callable(status_fn):
@@ -898,7 +921,9 @@ class PupilBridge:
         device_id, _ = self._extract_identity_fields(status)
         return device_id
 
-    def _extract_identity_fields(self, status: Any) -> tuple[Optional[str], Optional[str]]:
+    def _extract_identity_fields(
+        self, status: Any
+    ) -> tuple[Optional[str], Optional[str]]:
         device_id: Optional[str] = None
         module_serial: Optional[str] = None
 
@@ -958,7 +983,9 @@ class PupilBridge:
                         if module_serial:
                             break
         except Exception:
-            log.debug("Konnte Statusinformationen nicht vollständig auswerten", exc_info=True)
+            log.debug(
+                "Konnte Statusinformationen nicht vollständig auswerten", exc_info=True
+            )
 
         return device_id, module_serial
 
@@ -1193,7 +1220,9 @@ class PupilBridge:
 
         found_devices = self._perform_discovery(log_errors=True)
         if not found_devices:
-            log.warning("No Pupil devices discovered within %.1fs", self._connect_timeout)
+            log.warning(
+                "No Pupil devices discovered within %.1fs", self._connect_timeout
+            )
             return False
 
         for device in found_devices:
@@ -1239,7 +1268,11 @@ class PupilBridge:
             except Exception as exc:  # pragma: no cover - hardware dependent
                 log.warning("Gerät %s konnte nicht verbunden werden: %s", base_key, exc)
 
-        missing_players = [player for player, device in self._device_by_player.items() if device is None]
+        missing_players = [
+            player
+            for player, device in self._device_by_player.items()
+            if device is None
+        ]
         if missing_players:
             log.warning(
                 "No device found for players: %s", ", ".join(sorted(missing_players))
@@ -1259,6 +1292,7 @@ class PupilBridge:
         self._time_sync_tasks.clear()
         self._time_sync.clear()
         if self._async_loop.is_running():
+
             async def _cancel_all() -> None:
                 for task in asyncio.all_tasks():
                     if task is not asyncio.current_task():
@@ -1325,7 +1359,9 @@ class PupilBridge:
         if self._auto_players:
             target_players = self._auto_players
         else:
-            target_players = {p for p, dev in self._device_by_player.items() if dev is not None}
+            target_players = {
+                p for p, dev in self._device_by_player.items() if dev is not None
+            }
 
         if self._auto_session is None or self._auto_block is None:
             return set()
@@ -1348,7 +1384,9 @@ class PupilBridge:
         recording_label = self._format_recording_label(session, block, player)
 
         if self._active_recording.get(player):
-            self._update_recording_label(player, device, session, block, recording_label)
+            self._update_recording_label(
+                player, device, session, block, recording_label
+            )
             return
 
         controller = self._recording_controllers.get(player)
@@ -1498,7 +1536,9 @@ class PupilBridge:
         rest_status, rest_payload = self._start_recording_via_rest(player)
         if rest_status == "busy" and allow_busy_recovery:
             if self._handle_busy_state(player, device):
-                return self._invoke_recording_start(player, device, allow_busy_recovery=False)
+                return self._invoke_recording_start(
+                    player, device, allow_busy_recovery=False
+                )
             return False, None
         if rest_status is True:
             return True, rest_payload
@@ -1737,7 +1777,9 @@ class PupilBridge:
         try:
             self.send_event("recording.label", player, payload)
         except Exception:
-            log.debug("recording.label event fallback failed for %s", player, exc_info=True)
+            log.debug(
+                "recording.label event fallback failed for %s", player, exc_info=True
+            )
 
     def _wait_for_notification(
         self, device: Any, event: str, timeout: float = 5.0
@@ -1753,7 +1795,12 @@ class PupilBridge:
                 except TimeoutError:
                     return None
                 except Exception:
-                    log.debug("Warten auf %s via %s fehlgeschlagen", event, attr, exc_info=True)
+                    log.debug(
+                        "Warten auf %s via %s fehlgeschlagen",
+                        event,
+                        attr,
+                        exc_info=True,
+                    )
         return None
 
     def _extract_recording_id(self, info: Any) -> Optional[str]:
@@ -1769,7 +1816,10 @@ class PupilBridge:
 
         device = self._device_by_player.get(player)
         if device is None:
-            log.info("recording.cancel übersprungen (%s: nicht konfiguriert/verbunden)", player)
+            log.info(
+                "recording.cancel übersprungen (%s: nicht konfiguriert/verbunden)",
+                player,
+            )
             self._active_recording[player] = False
             self._recording_metadata.pop(player, None)
             controller = self._recording_controllers.get(player)
@@ -1783,7 +1833,11 @@ class PupilBridge:
         log.info("recording.cancel (%s)", player)
 
         cancelled = False
-        cancel_methods = ("recording_cancel", "recording_stop_and_discard", "cancel_recording")
+        cancel_methods = (
+            "recording_cancel",
+            "recording_stop_and_discard",
+            "cancel_recording",
+        )
         for method_name in cancel_methods:
             cancel_fn = getattr(device, method_name, None)
             if not callable(cancel_fn):
@@ -1834,9 +1888,13 @@ class PupilBridge:
                     )
 
         if cancelled:
-            cancel_info = self._wait_for_notification(device, "recording.cancelled", timeout=0.5)
+            cancel_info = self._wait_for_notification(
+                device, "recording.cancelled", timeout=0.5
+            )
             if cancel_info is None:
-                cancel_info = self._wait_for_notification(device, "recording.canceled", timeout=0.5)
+                cancel_info = self._wait_for_notification(
+                    device, "recording.canceled", timeout=0.5
+                )
             if cancel_info is None:
                 self._wait_for_notification(device, "recording.end", timeout=0.5)
         else:
@@ -1856,7 +1914,9 @@ class PupilBridge:
 
         device = self._device_by_player.get(player)
         if device is None:
-            log.info("recording.stop übersprungen (%s: nicht konfiguriert/verbunden)", player)
+            log.info(
+                "recording.stop übersprungen (%s: nicht konfiguriert/verbunden)", player
+            )
             return
 
         if not self._active_recording.get(player):
@@ -1985,7 +2045,10 @@ class PupilBridge:
             device_key = self._player_device_key.get(player)
             offset_ms = self.time_offset_ms.get(device_key, 0.0) if device_key else 0.0
             offset_ns = int(offset_ms * 1_000_000.0)
-            if abs(offset_ns) > 5_000_000_000 and player not in self._offset_anomaly_warned:
+            if (
+                abs(offset_ns) > 5_000_000_000
+                and player not in self._offset_anomaly_warned
+            ):
                 log.warning(
                     "Large clock offset for %s (offset_ns=%d) – keeping client-side timestamps",
                     player,
@@ -1994,7 +2057,11 @@ class PupilBridge:
                 self._offset_anomaly_warned.add(player)
             prepared_payload.pop("timestamp_ns", None)
             corrected_ns: int
-            if device_key and device_key in self._time_sync and device_key in self.time_offset_ms:
+            if (
+                device_key
+                and device_key in self._time_sync
+                and device_key in self.time_offset_ms
+            ):
                 calibrator = self._time_sync.get(device_key)
                 if calibrator is not None:
                     self.time_sync = calibrator
@@ -2066,7 +2133,11 @@ class PupilBridge:
             t_enqueue_ns=enqueue_ns,
             timestamp_policy=event.timestamp_policy,
         )
-        if self._low_latency_disabled or self._event_queue is None or event_priority == "high":
+        if (
+            self._low_latency_disabled
+            or self._event_queue is None
+            or event_priority == "high"
+        ):
             self._dispatch_with_metrics(queued)
             return
         try:
@@ -2090,9 +2161,7 @@ class PupilBridge:
                     )
                     self._last_queue_log = time.monotonic()
 
-    def _log_dispatch_latency(
-        self, event: _QueuedEvent, t_dispatch_ns: int
-    ) -> None:
+    def _log_dispatch_latency(self, event: _QueuedEvent, t_dispatch_ns: int) -> None:
         if not self._perf_logging:
             return
         log.debug(
@@ -2132,14 +2201,10 @@ class PupilBridge:
         if not self.ready.is_set():
             if event_priority == "high":
                 if not self.ready.wait(0.25):
-                    log.warning(
-                        "PupilBridge not ready; dropping HIGH event: %s", name
-                    )
+                    log.warning("PupilBridge not ready; dropping HIGH event: %s", name)
                     return
             else:
-                log.warning(
-                    "PupilBridge not ready; dropping NORMAL event: %s", name
-                )
+                log.warning("PupilBridge not ready; dropping NORMAL event: %s", name)
                 return
         assert self.ready.is_set()
         ui_event = UIEvent(
@@ -2280,5 +2345,3 @@ class PupilBridge:
 
 
 __all__ = ["PupilBridge"]
-
-

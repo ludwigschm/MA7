@@ -32,7 +32,7 @@ gibt die gesendeten Payloads in der Konsole aus.
 
 ## Neon Companion Hinweise
 
-- Die Companion-API stellt kein `/api/capabilities` mehr bereit. Geräteeigenschaften
+- Die Companion-API stellt keinen dedizierten Capabilities-Endpunkt mehr bereit. Geräteeigenschaften
   werden ausschließlich über die Status-Websocket-Payloads bestimmt.
 - `device_id` ist optional – fällt sie weg, nutzt die Bridge automatisch den
   `ip:port`-Endpunkt als Schlüssel und protokolliert den Fallback.
