@@ -71,6 +71,7 @@ def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
     cfg = NeonDeviceConfig(player="VP1", ip="127.0.0.1", port=8080)
     bridge._device_by_player["VP1"] = device  # type: ignore[attr-defined]
     bridge._on_device_connected("VP1", device, cfg, "dev-1")  # type: ignore[attr-defined]
+    bridge.ready.set()
     yield bridge, device
     bridge.close()
     config_path.unlink(missing_ok=True)
@@ -84,7 +85,7 @@ def test_event_router_single_target(bridge):
     assert decoded
     name, payload = decoded[0]
     assert name == "ui.test"
-    assert "timestamp_ns" in payload
+    assert "event_timestamp_unix_ns" in payload
 
 
 def test_recording_start_idempotent(bridge):

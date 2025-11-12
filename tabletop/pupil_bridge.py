@@ -17,7 +17,7 @@ from typing import Any, Dict, Iterable, Literal, Optional, Union
 import metrics
 from core.capabilities import CapabilityRegistry, DeviceCapabilities
 from core.device_registry import DeviceRegistry
-from core.event_router import EventRouter, UIEvent
+from core.event_router import EventRouter, TimestampPolicy, UIEvent, policy_for
 from core.recording import DeviceClient, RecordingController, RecordingHttpError
 from core.time_sync import TimeSyncManager
 
@@ -57,8 +57,12 @@ def _response_preview(response: Response) -> str:
     return (body or "")[:120]
 
 
-def host_monotonic_to_unix_ns(mono_ns: int) -> int:
+def host_unix_from_monotonic(mono_ns: int) -> int:
     return _EPOCH_ANCHOR_UNIX_NS + (mono_ns - _EPOCH_ANCHOR_MONO_NS)
+
+
+def host_monotonic_to_unix_ns(mono_ns: int) -> int:
+    return host_unix_from_monotonic(mono_ns)
 
 
 log = logging.getLogger(__name__)
@@ -145,7 +149,7 @@ class _QueuedEvent:
     priority: Literal["high", "normal"]
     t_ui_ns: int
     t_enqueue_ns: int
-    use_arrival_time: bool
+    timestamp_policy: TimestampPolicy
 
 
 class _BridgeDeviceClient(DeviceClient):
@@ -1746,7 +1750,7 @@ class PupilBridge:
         event_label = name
         payload_json: Optional[str] = None
         prepared_payload: Dict[str, Any] = dict(event.payload or {})
-        include_timestamp = not event.use_arrival_time
+        include_timestamp = event.timestamp_policy is TimestampPolicy.CLIENT_CORRECTED
         offset_ns = 0
         if include_timestamp:
             offset_ns = self.get_device_offset_ns(player)
@@ -1761,10 +1765,12 @@ class PupilBridge:
                     self._offset_anomaly_warned.add(player)
         if include_timestamp:
             mono_now = time.monotonic_ns()
-            host_now_unix_ns = host_monotonic_to_unix_ns(mono_now)
-            prepared_payload["timestamp_ns"] = host_now_unix_ns - offset_ns
+            host_now_unix_ns = host_unix_from_monotonic(mono_now)
+            prepared_payload.pop("timestamp_ns", None)
+            prepared_payload["event_timestamp_unix_ns"] = host_now_unix_ns - offset_ns
         else:
             prepared_payload.pop("timestamp_ns", None)
+            prepared_payload.pop("event_timestamp_unix_ns", None)
 
         if prepared_payload:
             try:
@@ -1819,7 +1825,7 @@ class PupilBridge:
             priority=event_priority,
             t_ui_ns=int(t_ui_ns),
             t_enqueue_ns=enqueue_ns,
-            use_arrival_time=event.use_arrival_time,
+            timestamp_policy=event.timestamp_policy,
         )
         if self._low_latency_disabled or self._event_queue is None or event_priority == "high":
             self._dispatch_with_metrics(queued)
@@ -1867,7 +1873,8 @@ class PupilBridge:
         payload: Optional[Dict[str, Any]] = None,
         *,
         priority: Literal["high", "normal"] = "normal",
-        use_arrival_time: bool = False,
+        use_arrival_time: bool | None = None,
+        policy: TimestampPolicy = TimestampPolicy.CLIENT_CORRECTED,
     ) -> None:
         """Send an event to the player's device, encoding payload as JSON suffix."""
 
@@ -1875,6 +1882,14 @@ class PupilBridge:
         event_priority: Literal["high", "normal"] = (
             "high" if priority == "high" else "normal"
         )
+        if use_arrival_time is not None:
+            policy = (
+                TimestampPolicy.ARRIVAL
+                if use_arrival_time
+                else TimestampPolicy.CLIENT_CORRECTED
+            )
+        elif policy is TimestampPolicy.CLIENT_CORRECTED:
+            policy = policy_for(name)
         if not self.ready.is_set():
             if event_priority == "high":
                 if not self.ready.wait(0.25):
@@ -1893,7 +1908,7 @@ class PupilBridge:
             payload=event_payload,
             target=player,
             priority=event_priority,
-            use_arrival_time=use_arrival_time,
+            timestamp_policy=policy,
         )
         self._event_router.register_player(player)
         self._event_router.route(ui_event)
