@@ -64,6 +64,10 @@ def _decoded_events(device: _FakeDevice) -> Iterator[tuple[str, dict]]:
 def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
     monkeypatch.setattr("tabletop.pupil_bridge._reachable", lambda *_, **__: True)
     monkeypatch.setenv("LOW_LATENCY_DISABLED", "1")
+    monkeypatch.setattr(
+        "core.event_router.get_health",
+        lambda: {"rms_ms": 0.0, "offset_jump_ms_last": 0.0, "is_stable": True},
+    )
     config_path = Path("/tmp/test_neon_devices.txt")
     config_path.write_text("VP1_IP=127.0.0.1\nVP1_PORT=8080\n", encoding="utf-8")
     bridge = PupilBridge(device_mapping={}, config_path=config_path)
@@ -93,6 +97,14 @@ def test_recording_start_idempotent(bridge):
     pupil_bridge.start_recording(1, 1, "VP1")
     pupil_bridge.start_recording(1, 1, "VP1")
     assert device.start_calls == 1
+    assert pupil_bridge._recording_metadata["VP1"]["recording_id"] == "fake"  # type: ignore[index]
+    pupil_bridge._event_router.flush_all()  # type: ignore[attr-defined]
+    started_event = next(
+        payload
+        for name, payload in _decoded_events(device)
+        if name == "session.recording_started"
+    )
+    assert started_event["recording_id"] == "fake"
 
 
 def test_recording_label_update_without_restart(bridge):
@@ -114,7 +126,9 @@ def test_recording_label_update_without_restart(bridge):
         if name == "recording.label"
     )
     assert updated_label_event["block"] == 2
-    assert pupil_bridge._recording_metadata["VP1"]["block"] == 2
+    metadata = pupil_bridge._recording_metadata["VP1"]
+    assert metadata["block"] == 2
+    assert metadata["recording_id"] == "fake"
 
 
 def test_time_sync_manager_used_for_offsets(bridge):

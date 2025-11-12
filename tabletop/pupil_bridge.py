@@ -180,15 +180,16 @@ class _BridgeDeviceClient(DeviceClient):
 
         await asyncio.to_thread(_start)
 
-    async def recording_begin(self) -> None:
-        def _begin() -> None:
+    async def recording_begin(self) -> object:
+        def _begin() -> object:
             info = self._bridge._wait_for_notification(
                 self._device, "recording.begin", timeout=0.5
             )
             if info is None:
                 raise asyncio.TimeoutError()
+            return info
 
-        await asyncio.to_thread(_begin)
+        return await asyncio.to_thread(_begin)
 
     async def recording_stop(self) -> None:
         def _stop() -> None:
@@ -603,13 +604,14 @@ class PupilBridge:
             controller = self._build_recording_controller(player, device, cfg)
             self._recording_controllers[player] = controller
 
-        async def orchestrate() -> None:
+        async def orchestrate() -> Optional[str]:
             await controller.ensure_started(label=label)
-            await controller.begin_segment()
+            info = await controller.begin_segment()
+            return self._extract_recording_id(info) if info is not None else None
 
         future = asyncio.run_coroutine_threadsafe(orchestrate(), self._async_loop)
         try:
-            future.result(timeout=max(1.0, self._connect_timeout))
+            recording_id = future.result(timeout=max(1.0, self._connect_timeout))
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("Auto recording start failed for %s: %s", player, exc)
             return
@@ -619,7 +621,7 @@ class PupilBridge:
             "player": player,
             "recording_label": label,
             "event": "auto_start",
-            "recording_id": None,
+            "recording_id": recording_id,
         }
 
     def _on_device_connected(
@@ -1221,13 +1223,14 @@ class PupilBridge:
             block,
         )
 
-        async def orchestrate() -> None:
+        async def orchestrate() -> Optional[str]:
             await controller.ensure_started(label=recording_label)
-            await controller.begin_segment()
+            info = await controller.begin_segment()
+            return self._extract_recording_id(info) if info is not None else None
 
         future = asyncio.run_coroutine_threadsafe(orchestrate(), self._async_loop)
         try:
-            future.result(timeout=max(1.0, self._connect_timeout))
+            recording_id = future.result(timeout=max(1.0, self._connect_timeout))
         except RecordingHttpError as exc:
             log.warning(
                 "recording start failed player=%s status=%s msg=%s",
@@ -1248,7 +1251,7 @@ class PupilBridge:
             "block": block,
             "player": player,
             "recording_label": recording_label,
-            "recording_id": None,
+            "recording_id": recording_id,
         }
         self._active_recording[player] = True
         self._recording_metadata[player] = payload
@@ -1943,6 +1946,7 @@ class PupilBridge:
             "session",
             "block",
             "player",
+            "recording_id",
             "button",
             "phase",
             "round_index",
