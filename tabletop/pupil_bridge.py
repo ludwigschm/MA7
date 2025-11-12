@@ -36,10 +36,6 @@ except Exception:  # pragma: no cover - optional dependency
 
 from requests import Response
 
-_EPOCH_ANCHOR_MONO_NS = time.monotonic_ns()
-_EPOCH_ANCHOR_UNIX_NS = time.time_ns()
-
-
 _HTTP_SESSION = get_sync_session()
 _JSON_HEADERS = {"Content-Type": "application/json"}
 _REST_START_PAYLOAD = json.dumps({"action": "START"}, separators=(",", ":"))
@@ -55,14 +51,6 @@ def _response_preview(response: Response) -> str:
     except Exception:
         return ""
     return (body or "")[:120]
-
-
-def host_unix_from_monotonic(mono_ns: int) -> int:
-    return _EPOCH_ANCHOR_UNIX_NS + (mono_ns - _EPOCH_ANCHOR_MONO_NS)
-
-
-def host_monotonic_to_unix_ns(mono_ns: int) -> int:
-    return host_unix_from_monotonic(mono_ns)
 
 
 log = logging.getLogger(__name__)
@@ -1860,8 +1848,7 @@ class PupilBridge:
                     )
                     self._offset_anomaly_warned.add(player)
         if include_timestamp:
-            mono_now = time.monotonic_ns()
-            host_now_unix_ns = host_unix_from_monotonic(mono_now)
+            host_now_unix_ns = time.time_ns()
             prepared_payload.pop("timestamp_ns", None)
             prepared_payload["event_timestamp_unix_ns"] = host_now_unix_ns - offset_ns
         else:
