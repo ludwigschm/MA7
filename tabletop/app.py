@@ -816,6 +816,23 @@ class TabletopApp(App):
 
         super().on_stop()
 
+    def abort_block(self) -> None:
+        """Abort the active block and discard ongoing recordings."""
+
+        root = cast(Optional[TabletopRoot], self.root)
+        if root is not None:
+            abort_fn = getattr(root, "abort_block", None)
+            if callable(abort_fn):
+                abort_fn()
+                return
+
+        if self._bridge is not None:
+            for player in self._iter_active_players():
+                try:
+                    self._bridge.recording_cancel(player)
+                except Exception:  # pragma: no cover - defensive fallback
+                    log.exception("Failed to cancel recording for %s", player)
+
 
 def _configure_async_logging() -> tuple[Optional[QueueListener], Optional[Queue]]:
     """Install a queue-based logging pipeline if supported."""

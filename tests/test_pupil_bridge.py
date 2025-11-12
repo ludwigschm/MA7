@@ -13,15 +13,23 @@ class _FakeDevice:
     def __init__(self) -> None:
         self.events: list[Tuple[Tuple[object, ...], dict]] = []
         self.start_calls = 0
+        self.cancel_calls = 0
+        self.active = False
         self.offset_index = 0
         self.offset_samples = [0.01 + i * 0.0005 for i in range(20)]
         self._notifications: dict[str, object] = {"recording.begin": {"recording_id": "fake"}}
 
     def recording_start(self) -> None:
         self.start_calls += 1
+        self.active = True
 
     def recording_stop(self) -> None:  # pragma: no cover - defensive
-        self.start_calls = max(0, self.start_calls - 1)
+        self.active = False
+
+    def recording_cancel(self) -> None:
+        self.cancel_calls += 1
+        self._notifications["recording.cancelled"] = {"recording_id": "fake"}
+        self.active = False
 
     def wait_for_notification(self, event: str, timeout: float = 0.5) -> object:
         return self._notifications.get(event)
@@ -129,6 +137,24 @@ def test_recording_label_update_without_restart(bridge):
     metadata = pupil_bridge._recording_metadata["VP1"]
     assert metadata["block"] == 2
     assert metadata["recording_id"] == "fake"
+
+
+def test_recording_cancel_clears_state(bridge):
+    pupil_bridge, device = bridge
+    pupil_bridge.start_recording(1, 1, "VP1")
+    assert pupil_bridge.is_recording("VP1") is True
+
+    pupil_bridge.recording_cancel("VP1")
+    assert pupil_bridge.is_recording("VP1") is False
+    assert "VP1" not in pupil_bridge._recording_metadata
+    assert device.cancel_calls == 1
+
+    pupil_bridge.recording_cancel("VP1")  # idempotent
+    assert device.cancel_calls == 2
+
+    pupil_bridge.start_recording(1, 1, "VP1")
+    assert device.start_calls == 2
+    assert pupil_bridge.is_recording("VP1") is True
 
 
 def test_time_sync_manager_used_for_offsets(bridge):

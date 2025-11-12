@@ -215,6 +215,12 @@ class _BridgeDeviceClient(DeviceClient):
     async def is_recording(self) -> bool:
         return bool(self._bridge._active_recording.get(self._player))
 
+    async def recording_cancel(self) -> None:
+        def _cancel() -> None:
+            self._bridge.recording_cancel(self._player)
+
+        await asyncio.to_thread(_cancel)
+
 def _load_device_config(path: Path) -> Dict[str, NeonDeviceConfig]:
     configs: Dict[str, NeonDeviceConfig] = {
         "VP1": NeonDeviceConfig("VP1"),
@@ -1623,6 +1629,93 @@ class PupilBridge:
                 if value:
                     return str(value)
         return None
+
+    def recording_cancel(self, player: str) -> None:
+        """Abort an active recording for *player* if possible."""
+
+        device = self._device_by_player.get(player)
+        if device is None:
+            log.info("recording.cancel übersprungen (%s: nicht konfiguriert/verbunden)", player)
+            self._active_recording[player] = False
+            self._recording_metadata.pop(player, None)
+            controller = self._recording_controllers.get(player)
+            if controller is not None:
+                try:
+                    controller._active = False  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            return
+
+        log.info("recording.cancel (%s)", player)
+
+        cancelled = False
+        cancel_methods = ("recording_cancel", "recording_stop_and_discard", "cancel_recording")
+        for method_name in cancel_methods:
+            cancel_fn = getattr(device, method_name, None)
+            if not callable(cancel_fn):
+                continue
+            try:
+                cancel_fn()
+            except Exception as exc:  # pragma: no cover - hardware dependent
+                log.warning(
+                    "recording cancel via %s failed for %s: %s",
+                    method_name,
+                    player,
+                    exc,
+                )
+            else:
+                cancelled = True
+                break
+
+        if not cancelled:
+            response = self._post_device_api(
+                player,
+                "/api/recording",
+                {"action": "CANCEL"},
+                warn=False,
+            )
+            if response is not None:
+                status = response.status_code
+                if status in (200, 202, 204):
+                    cancelled = True
+                elif status == 400:
+                    preview = _response_preview(response).lower()
+                    if "no recording" in preview or "not recording" in preview:
+                        cancelled = True
+                    else:
+                        log.warning(
+                            "REST recording cancel failed player=%s endpoint=%s status=%s body=%s",
+                            player,
+                            response.url,
+                            status,
+                            _response_preview(response),
+                        )
+                else:
+                    log.warning(
+                        "REST recording cancel failed player=%s endpoint=%s status=%s body=%s",
+                        player,
+                        response.url,
+                        status,
+                        _response_preview(response),
+                    )
+
+        if cancelled:
+            cancel_info = self._wait_for_notification(device, "recording.cancelled", timeout=0.5)
+            if cancel_info is None:
+                cancel_info = self._wait_for_notification(device, "recording.canceled", timeout=0.5)
+            if cancel_info is None:
+                self._wait_for_notification(device, "recording.end", timeout=0.5)
+        else:
+            log.warning("recording.cancel nicht bestätigt (%s)", player)
+
+        self._active_recording[player] = False
+        self._recording_metadata.pop(player, None)
+        controller = self._recording_controllers.get(player)
+        if controller is not None:
+            try:
+                controller._active = False  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def stop_recording(self, player: str) -> None:
         """Stop the active recording for the player if possible."""

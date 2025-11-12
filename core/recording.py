@@ -27,6 +27,8 @@ class DeviceClient(Protocol):
 
     async def recording_stop(self) -> None: ...
 
+    async def recording_cancel(self) -> None: ...
+
     async def is_recording(self) -> bool: ...
 
 
@@ -119,6 +121,16 @@ class RecordingController:
         if not self._active:
             self._active = await self._client.is_recording()
         return self._active
+
+    async def cancel(self) -> None:
+        """Abort the current recording, discarding captured data if possible."""
+
+        try:
+            await self._client.recording_cancel()
+        finally:
+            if self._active:
+                self._log.info("recording cancel ok")
+            self._active = False
 
 
 @asynccontextmanager
