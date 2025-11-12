@@ -1,5 +1,7 @@
 """Integration helpers for communicating with Pupil Labs devices."""
 
+# // Neon RT API does not expose /api/capabilities. Status websocket is the source of truth.
+
 from __future__ import annotations
 
 import asyncio
