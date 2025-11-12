@@ -21,6 +21,10 @@ __all__ = [
     "TimeSyncHealthSampler",
     "TimeSyncManager",
     "TimeSyncSampleError",
+    "TimeSyncSample",
+    "TimeSyncResult",
+    "OfficialTimeSync",
+    "make_timesync",
     "get_offset_ns",
     "get_offset_ns_for_event",
     "get_health",
@@ -40,6 +44,23 @@ STABLE_JUMP_THRESHOLD_MS = 3.0
 
 class TimeSyncSampleError(RuntimeError):
     """Raised when a time synchronisation measurement fails."""
+
+
+@dataclass(frozen=True)
+class TimeSyncSample:
+    offset_ms: float
+    rtt_ms: float
+    accepted: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TimeSyncResult:
+    median_offset_ms: float
+    iqr_ms: float
+    rms_rtt_ms: float
+    accepted: int
+    total: int
 
 
 @dataclass(frozen=True)
@@ -237,7 +258,7 @@ class TimeSyncManager:
                 new_state, sample_count = await self._collect_state()
             except TimeSyncSampleError as exc:
                 self._log.warning(
-                    "TimeSync: device=%s status=failed error=%s",
+                    "TimeSync measurement failed for %s: %s",
                     self.device_id,
                     exc,
                 )
@@ -340,6 +361,113 @@ class TimeSyncManager:
         if self._resync_task is None or self._resync_task.done():
             self._stopped.clear()
             self._resync_task = asyncio.create_task(self._run_resync_loop())
+
+
+class OfficialTimeSync:
+    def __init__(
+        self,
+        device: Any,
+        device_key: str,
+        min_samples: int = 10,
+        max_samples: int = 40,
+        rtt_ms_max: float = 120.0,
+        offset_ms_abs_max: float = 250.0,
+        inter_sample_sleep_s: float = 0.03,
+    ) -> None:
+        self.device = device
+        self.device_key = device_key
+        self.min_samples = int(min_samples)
+        self.max_samples = int(max_samples)
+        self.rtt_ms_max = float(rtt_ms_max)
+        self.offset_ms_abs_max = float(offset_ms_abs_max)
+        self.inter_sample_sleep_s = float(inter_sample_sleep_s)
+        self._log = logging.getLogger(f"core.time_sync.{device_key}")
+
+    async def measure_once(self) -> TimeSyncSample | None:
+        est = await self.device.estimate_time_offset()
+        if est is None:
+            return TimeSyncSample(0.0, 0.0, False, "estimator_none")
+        try:
+            offset_ms = float(est.time_offset_ms.mean)
+            rtt_ms = float(est.roundtrip_duration_ms.mean)
+        except Exception as exc:  # pragma: no cover - estimator contract
+            return TimeSyncSample(0.0, 0.0, False, f"estimator_bad:{exc!s}")
+        reason = None
+        accepted = True
+        if abs(offset_ms) > self.offset_ms_abs_max:
+            accepted = False
+            reason = "abs_offset"
+        elif rtt_ms <= 0 or rtt_ms > self.rtt_ms_max:
+            accepted = False
+            reason = "rtt_range"
+        return TimeSyncSample(offset_ms, rtt_ms, accepted, reason)
+
+    async def calibrate(self) -> TimeSyncResult:
+        samples: list[TimeSyncSample] = []
+        while len(samples) < self.max_samples:
+            sample = await self.measure_once()
+            if sample is not None:
+                samples.append(sample)
+            await asyncio.sleep(self.inter_sample_sleep_s)
+
+        accepted = [sample for sample in samples if sample.accepted]
+        if len(accepted) < self.min_samples:
+            self._log_tail(samples)
+            if len(accepted) == 0:
+                raise RuntimeError("TimeSync: no valid samples")
+            raise RuntimeError(
+                f"TimeSync: insufficient valid samples {len(accepted)}/{len(samples)}"
+            )
+
+        median_offset = statistics.median(sample.offset_ms for sample in accepted)
+        sorted_offsets = sorted(sample.offset_ms for sample in accepted)
+        half = len(sorted_offsets) // 2
+        q1 = statistics.median(sorted_offsets[:half])
+        q3 = statistics.median(sorted_offsets[(len(sorted_offsets) + 1) // 2 :])
+        iqr = q3 - q1
+        rms_rtt = (sum(sample.rtt_ms**2 for sample in accepted) / len(accepted)) ** 0.5
+
+        self._log_summary(median_offset, iqr, rms_rtt, len(accepted), len(samples))
+        return TimeSyncResult(median_offset, iqr, rms_rtt, len(accepted), len(samples))
+
+    def apply_ns(self, device_ts_ns: int, median_offset_ms: float) -> int:
+        return int(device_ts_ns + median_offset_ms * 1e6)
+
+    def _log_tail(self, samples: list[TimeSyncSample]) -> None:
+        for sample in samples[-5:]:
+            status = "ok" if sample.accepted else "reject:" + str(sample.reason)
+            message = (
+                f"TIMESYNC_SAMPLE device={self.device_key} rtt_ms={sample.rtt_ms:.2f} "
+                f"offset_ms={sample.offset_ms:.2f} {status}"
+            )
+            if sample.accepted:
+                if self._log.isEnabledFor(logging.DEBUG):
+                    self._log.debug(message)
+            else:
+                self._log.warning(message)
+
+    def _log_summary(
+        self,
+        median_ms: float,
+        iqr: float,
+        rms_rtt_ms: float,
+        accepted: int,
+        total: int,
+    ) -> None:
+        self._log.info(
+            "TIMESYNC_SUMMARY device=%s median_ms=%.2f iqr_ms=%.2f "
+            "rms_rtt_ms=%.2f accepted=%d/%d",
+            self.device_key,
+            median_ms,
+            iqr,
+            rms_rtt_ms,
+            accepted,
+            total,
+        )
+
+
+def make_timesync(device: Any, device_key: str, **kwargs: Any) -> OfficialTimeSync:
+    return OfficialTimeSync(device, device_key, **kwargs)
 
 
 def get_offset_ns_for_event() -> int:
