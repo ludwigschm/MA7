@@ -20,6 +20,7 @@ from core.device_registry import DeviceRegistry
 from core.event_router import EventRouter, TimestampPolicy, UIEvent, policy_for
 from core.recording import DeviceClient, RecordingController, RecordingHttpError
 from core.time_sync import TimeSyncManager
+from core.clock import now_ns
 
 from core.http_client import get_sync_session
 
@@ -1840,7 +1841,7 @@ class PupilBridge:
                 except Exception:
                     pass
         if include_timestamp:
-            host_now_unix_ns = time.time_ns()
+            host_now_unix_ns = now_ns()
             prepared_payload.pop("timestamp_ns", None)
             prepared_payload["event_timestamp_unix_ns"] = host_now_unix_ns - offset_ns
         else:

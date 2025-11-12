@@ -63,11 +63,10 @@ def test_ui_event_client_corrected_timestamp(
 
     offset_ns = 123_456_789
     ground_truth = 1_000_000_000 - offset_ns
-    monkeypatch.setattr("time.monotonic_ns", lambda: 500_000_000)
-    monkeypatch.setattr(
-        "tabletop.pupil_bridge.host_unix_from_monotonic",
-        lambda _: ground_truth + offset_ns,
-    )
+    host_now = ground_truth + offset_ns
+    monkeypatch.setattr("core.clock.now_ns", lambda: host_now)
+    monkeypatch.setattr("tabletop.pupil_bridge.now_ns", lambda: host_now)
+    monkeypatch.setattr("MA7_main.core.clock.now_ns", lambda: host_now)
     monkeypatch.setattr(
         TimeSyncManager, "get_offset_ns", lambda self: offset_ns, raising=False
     )
@@ -83,6 +82,11 @@ def test_ui_event_client_corrected_timestamp(
     payload = json.loads(encoded)
     assert "event_timestamp_unix_ns" in payload
     assert abs(payload["event_timestamp_unix_ns"] - ground_truth) <= 1_500_000
+
+
+def test_no_monotonic_in_events_payload() -> None:
+    src = (Path(__file__).resolve().parent.parent / "tabletop" / "tabletop_view.py").read_text()
+    assert "time.monotonic_ns(" not in src, "monotonic_ns must not be used for event payload timestamps"
 
 
 def test_policy_falls_back_when_timesync_unstable(monkeypatch: pytest.MonkeyPatch) -> None:
