@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Any, AsyncIterator, Optional, Protocol
 
 from .logging import get_logger
 
@@ -13,6 +14,7 @@ __all__ = [
     "DeviceClient",
     "RecordingHttpError",
     "RecordingController",
+    "recording_session",
 ]
 
 
@@ -21,7 +23,7 @@ class DeviceClient(Protocol):
 
     async def recording_start(self, *, label: str | None = None) -> None: ...
 
-    async def recording_begin(self) -> None: ...
+    async def recording_begin(self) -> Any: ...
 
     async def recording_stop(self) -> None: ...
 
@@ -86,17 +88,21 @@ class RecordingController:
 
         raise RecordingHttpError(503, "recording start retries exhausted", transient=True)
 
-    async def begin_segment(self, deadline_ms: int = 500) -> None:
+    async def begin_segment(self, deadline_ms: int = 500) -> Any:
         """Trigger a recording segment begin event with a strict timeout."""
 
         if not self._active:
-            return
+            return None
         try:
-            await asyncio.wait_for(self._client.recording_begin(), timeout=deadline_ms / 1000)
+            info = await asyncio.wait_for(
+                self._client.recording_begin(), timeout=deadline_ms / 1000
+            )
         except asyncio.TimeoutError:
             self._log.warning("recording begin timeout; best-effort continue")
+            return None
         else:
             self._log.info("recording begin ok")
+            return info
 
     async def stop(self) -> None:
         """Stop the recording if active."""
@@ -113,3 +119,15 @@ class RecordingController:
         if not self._active:
             self._active = await self._client.is_recording()
         return self._active
+
+
+@asynccontextmanager
+async def recording_session(bridge: Any, player: str, label: str) -> AsyncIterator[Any]:
+    """Ensure events run while the device is actively recording."""
+
+    recording_id = await bridge.recording_start(player, label=label)
+    await bridge.recording_begin(player)
+    try:
+        yield recording_id
+    finally:
+        await bridge.recording_stop_and_save(player)
