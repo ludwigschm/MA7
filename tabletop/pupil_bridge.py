@@ -75,7 +75,7 @@ from tabletop.utils.runtime import (
 CONFIG_TEMPLATE = """# Neon Geräte-Konfiguration
 
 VP1_ID=
-VP1_IP=192.168.137.121
+VP1_IP=192.168.137.92
 VP1_PORT=8080
 
 VP2_ID=
