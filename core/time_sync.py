@@ -17,6 +17,7 @@ from .logging import get_logger
 __all__ = [
     "AtomicRef",
     "OffsetState",
+    "TimeSyncHealthSampler",
     "TimeSyncManager",
     "TimeSyncSampleError",
     "get_offset_ns",
@@ -339,3 +340,95 @@ def get_offset_ns_for_event() -> int:
     """Backwards-compatible alias for event senders."""
 
     return get_offset_ns()
+
+
+class TimeSyncHealthSampler:
+    """Periodically sample the current time-sync health for diagnostics."""
+
+    def __init__(
+        self,
+        device_id: str,
+        *,
+        interval_s: float = 5.0,
+        warn_interval_s: float = 10.0,
+        event_emitter: Optional[Callable[[str, dict[str, Any]], None]] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        self.device_id = device_id
+        self.interval_s = float(interval_s)
+        self.warn_interval_s = float(warn_interval_s)
+        self._event_emitter = event_emitter
+        self._log = logger or get_logger(f"core.time_sync.health.{device_id}")
+        self._task: Optional[asyncio.Task[None]] = None
+        self._stop_event = asyncio.Event()
+        self._last_warn_monotonic = 0.0
+        self._last_stable: Optional[bool] = None
+
+    async def start(self) -> None:
+        """Start sampling in the background."""
+
+        if self._task and not self._task.done():
+            return
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        """Stop the background sampler."""
+
+        if not self._task:
+            return
+        self._stop_event.set()
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._task = None
+
+    async def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                self._sample()
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_s)
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+
+    def _sample(self) -> None:
+        health = _health_state.load()
+        state = _offset_state.load()
+        rms_ms = float(health.rms_ms)
+        jump_ms = float(health.offset_jump_ms_last)
+        is_stable = bool(health.is_stable)
+        now = time.monotonic()
+
+        exceeds_warn = abs(rms_ms) > 3.0 or abs(jump_ms) > 5.0
+        if exceeds_warn and (now - self._last_warn_monotonic) >= self.warn_interval_s:
+            self._log.warning(
+                "TimeSync instability detected device=%s rms_ms=%.3f jump_ms=%.3f",
+                self.device_id,
+                rms_ms,
+                jump_ms,
+            )
+            self._last_warn_monotonic = now
+
+        if self._last_stable is None:
+            self._last_stable = is_stable
+        elif self._last_stable != is_stable:
+            self._last_stable = is_stable
+            payload = {
+                "device_id": self.device_id,
+                "stable": is_stable,
+                "rms_ms": rms_ms,
+                "offset_jump_ms_last": jump_ms,
+                "offset_ns": state.median_ns,
+            }
+            emitter = self._event_emitter
+            if emitter is not None:
+                try:
+                    emitter("timesync.recalibrated", payload)
+                except Exception:
+                    self._log.exception("TimeSync health event emission failed")
