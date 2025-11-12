@@ -29,3 +29,13 @@ python -m tabletop.app --demo
 
 Der Demo-Lauf simuliert UI-Events mit der gleichen Whitelisting-Logik und
 gibt die gesendeten Payloads in der Konsole aus.
+
+## Neon Companion Hinweise
+
+- Die Companion-API stellt keinen dedizierten Capabilities-Endpunkt mehr bereit. Geräteeigenschaften
+  werden ausschließlich über die Status-Websocket-Payloads bestimmt.
+- `device_id` ist optional – fällt sie weg, nutzt die Bridge automatisch den
+  `ip:port`-Endpunkt als Schlüssel und protokolliert den Fallback.
+- Die Zeit-Synchronisation verwendet `estimate_time_offset()` der offiziellen
+  Realtime-API. Abweichungen und Filterentscheidungen werden im Timesync-Log
+  transparent nachverfolgt.
