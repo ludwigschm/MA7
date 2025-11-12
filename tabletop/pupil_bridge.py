@@ -675,27 +675,10 @@ class PupilBridge:
         except Exception as exc:
             log.warning("Initial time sync failed for %s: %s", player, exc)
         self._time_sync[player] = manager
-        self._schedule_periodic_resync(player)
 
     def _schedule_periodic_resync(self, player: str) -> None:
-        existing = self._time_sync_tasks.get(player)
-        if existing is not None:
-            existing.cancel()
-
-        manager = self._time_sync.get(player)
-        if manager is None:
-            return
-
-        async def periodic() -> None:
-            while True:
-                await asyncio.sleep(manager.resync_interval_s)
-                try:
-                    await manager.maybe_resync()
-                except Exception as exc:  # pragma: no cover - defensive
-                    log.debug("time_sync resync failed for %s: %s", player, exc)
-
-        task = asyncio.run_coroutine_threadsafe(periodic(), self._async_loop)
-        self._time_sync_tasks[player] = task
+        # Deaktiviert: kein periodischer Re-Sync mehr
+        return
 
     def _build_recording_controller(
         self, player: str, device: Any, cfg: NeonDeviceConfig
