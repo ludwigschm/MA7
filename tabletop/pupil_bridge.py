@@ -1,5 +1,7 @@
 """Integration helpers for communicating with Pupil Labs devices."""
 
+# // Neon RT API does not expose /api/capabilities. Status websocket is the source of truth.
+
 from __future__ import annotations
 
 import asyncio
@@ -10,16 +12,17 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Literal, Optional, Union
 
 import metrics
-from core.capabilities import CapabilityRegistry, DeviceCapabilities
 from core.device_registry import DeviceRegistry
 from core.event_router import EventRouter, TimestampPolicy, UIEvent, policy_for
 from core.recording import DeviceClient, RecordingController, RecordingHttpError
-from core.time_sync import TimeSyncManager
+from core.time_sync import make_timesync, OfficialTimeSync
 from core.clock import now_ns
 
 from core.http_client import get_sync_session
@@ -52,6 +55,10 @@ def _response_preview(response: Response) -> str:
     except Exception:
         return ""
     return (body or "")[:120]
+
+
+def device_key_from(status_ip: str, status_port: int, device_id: str | None) -> str:
+    return device_id if device_id else f"{status_ip}:{status_port}"
 
 
 log = logging.getLogger(__name__)
@@ -128,6 +135,12 @@ class NeonDeviceConfig:
             port_display = str(self.port) if self.port is not None else "-"
         id_display = self.device_id or "-"
         return f"{self.player}(ip={ip_display}, port={port_display}, id={id_display})"
+
+
+@dataclass
+class DeviceIdentity:
+    device_id: Optional[str]
+    module_serial: Optional[str]
 
 
 @dataclass
@@ -284,7 +297,7 @@ class PupilBridge:
         _ensure_config_file(config_file)
         self._device_config = _load_device_config(config_file)
         mapping_src = device_mapping if device_mapping is not None else self.DEFAULT_MAPPING
-        self._device_id_to_player: Dict[str, str] = {
+        self._device_key_to_player: Dict[str, str] = {
             str(device_id).lower(): player for device_id, player in mapping_src.items() if player
         }
         self._connect_timeout = float(connect_timeout)
@@ -310,13 +323,17 @@ class PupilBridge:
         self._offset_anomaly_warned: set[str] = set()
         self.ready = threading.Event()
         self._device_registry = DeviceRegistry()
-        self._capabilities = CapabilityRegistry()
-        self._time_sync: Dict[str, TimeSyncManager] = {}
-        self._time_sync_tasks: Dict[str, asyncio.Future[None]] = {}
-        self.time_sync: Optional[TimeSyncManager] = None
+        self._time_sync: Dict[str, OfficialTimeSync] = {}
+        self._time_sync_tasks: Dict[str, asyncio.Future[Optional[object]]] = {}
+        self.time_sync: Optional[OfficialTimeSync] = None
+        self.time_offset_ms: Dict[str, float] = {}
         self._recording_controllers: Dict[str, RecordingController] = {}
         self._active_router_player: Optional[str] = None
-        self._player_device_id: Dict[str, str] = {}
+        self._player_device_key: Dict[str, str] = {}
+        self._status_payload_cache: Dict[str, Any] = {}
+        self._device_key_usage: Dict[str, int] = {}
+        self._assigned_device_keys: set[str] = set()
+        self._missing_device_id_warned = False
         self._async_loop = asyncio.new_event_loop()
         self._async_thread = threading.Thread(
             target=self._async_loop.run_forever,
@@ -395,7 +412,7 @@ class PupilBridge:
                 continue
             try:
                 device = self._connect_device_with_retries(player, cfg)
-                actual_id = self._validate_device_identity(device, cfg)
+                identity = self._validate_device_identity(device, cfg)
             except Exception as exc:  # pragma: no cover - hardware dependent
                 if player == "VP1":
                     raise RuntimeError(f"VP1 konnte nicht verbunden werden: {exc}") from exc
@@ -404,14 +421,15 @@ class PupilBridge:
                 continue
 
             self._device_by_player[player] = device
+            device_key = self._resolve_device_key(cfg, identity)
             log.info(
-                "Verbunden mit %s (ip=%s, port=%s, device_id=%s)",
+                "Verbunden mit %s (ip=%s, port=%s, device_key=%s)",
                 player,
                 cfg.ip,
                 cfg.port,
-                actual_id,
+                device_key,
             )
-            self._on_device_connected(player, device, cfg, actual_id)
+            self._on_device_connected(player, device, cfg, device_key)
             self._auto_start_recording(player, device)
 
         if "VP1" in configured_players and self._device_by_player.get("VP1") is None:
@@ -526,14 +544,15 @@ class PupilBridge:
                 except Exception:
                     log.debug("%s() schlug fehl beim Aufräumen", attr, exc_info=True)
 
-    def _validate_device_identity(self, device: Any, cfg: NeonDeviceConfig) -> str:
-        status = self._get_device_status(device)
+    def _validate_device_identity(self, device: Any, cfg: NeonDeviceConfig) -> DeviceIdentity:
+        status = self._get_device_status(device, cfg.player)
         if status is None and cfg.ip and cfg.port is not None:
             url = f"http://{cfg.ip}:{cfg.port}/api/status"
             try:
                 response = _HTTP_SESSION.get(url, timeout=self._connect_timeout)
                 response.raise_for_status()
                 status = response.json()
+                self._remember_status_payload(cfg.player, status)
             except Exception as exc:
                 log.error("HTTP-Statusabfrage %s fehlgeschlagen: %s", url, exc)
 
@@ -559,32 +578,63 @@ class PupilBridge:
         if device_id:
             log.info("device_id=%s bestätigt (cfg=%s)", device_id, cfg_display)
             if expected_hex and device_id.lower() != expected_hex.lower():
-                self._close_device(device)
-                raise RuntimeError(
-                    f"Gefundenes device_id={device_id} passt nicht zu Konfig {cfg_display}"
+                log.warning(
+                    "Observed device_id %s does not match configured %s; continuing",
+                    device_id,
+                    expected_hex,
                 )
-            if not cfg.device_id:
+            elif not cfg.device_id:
                 cfg.device_id = device_id
             if not self.ready.is_set():
                 self.ready.set()
-            return device_id
+            return DeviceIdentity(device_id=device_id, module_serial=module_serial)
 
         if module_serial:
             log.info("Kein device_id im Status, nutze module_serial=%s (cfg=%s)", module_serial, cfg_display)
-        else:
-            log.warning(
-                "device_id not present in status; proceeding based on IP/port only (cfg=%s)",
-                cfg_display,
-            )
 
         if expected_hex and not device_id:
             log.warning(
                 "Konfigurierte device_id %s konnte nicht bestätigt werden.", expected_hex
             )
 
+        if not device_id:
+            self._warn_missing_device_id_once()
+
         if not self.ready.is_set():
             self.ready.set()
-        return module_serial or ""
+        return DeviceIdentity(device_id=None, module_serial=module_serial)
+
+    def _warn_missing_device_id_once(self) -> None:
+        if not self._missing_device_id_warned:
+            log.warning("device_id missing in status; falling back to endpoint key")
+            self._missing_device_id_warned = True
+
+    def _assign_device_key(self, base_key: str) -> str:
+        count = self._device_key_usage.get(base_key, 0)
+        if count == 0 and base_key not in self._assigned_device_keys:
+            unique_key = base_key
+            self._device_key_usage[base_key] = 1
+            self._assigned_device_keys.add(unique_key)
+            return unique_key
+
+        suffix = max(count, 1) + 1
+        candidate = f"{base_key}-{suffix}"
+        while candidate in self._assigned_device_keys:
+            suffix += 1
+            candidate = f"{base_key}-{suffix}"
+        self._device_key_usage[base_key] = suffix
+        self._assigned_device_keys.add(candidate)
+        log.warning(
+            "device endpoint key %s already in use; assigning %s to additional device",
+            base_key,
+            candidate,
+        )
+        return candidate
+
+    def _resolve_device_key(self, cfg: NeonDeviceConfig, identity: DeviceIdentity) -> str:
+        port = cfg.port if cfg.port is not None else 0
+        base_key = device_key_from(cfg.ip or "", int(port), identity.device_id)
+        return self._assign_device_key(base_key)
 
     def _auto_start_recording(self, player: str, device: Any) -> None:
         if self._active_recording.get(player):
@@ -624,58 +674,55 @@ class PupilBridge:
         player: str,
         device: Any,
         cfg: NeonDeviceConfig,
-        device_id: str,
+        device_key: str,
     ) -> None:
         endpoint = cfg.address or ""
         if endpoint:
-            self._device_registry.confirm(endpoint, device_id)
-        self._player_device_id[player] = device_id
+            self._device_registry.confirm(endpoint, device_key)
+        self._player_device_key[player] = device_key
         self._event_router.register_player(player)
         if self._active_router_player is None:
             self._event_router.set_active_player(player)
             self._active_router_player = player
-        self._setup_time_sync(player, device_id, device)
+        self._setup_time_sync(player, device_key, device)
         self._recording_controllers[player] = self._build_recording_controller(
             player, device, cfg
         )
-        self._probe_capabilities(player, cfg, device_id)
+        self._probe_capabilities(player, device, device_key)
 
-    def _setup_time_sync(self, player: str, device_id: str, device: Any) -> None:
-        async def measure(samples: int, timeout: float) -> list[float]:
-            estimator = getattr(device, "estimate_time_offset", None)
-            if not callable(estimator):
-                return []
-            offsets: list[float] = []
-            for _ in range(samples):
-                try:
-                    value = await asyncio.wait_for(
-                        asyncio.to_thread(estimator), timeout
-                    )
-                except asyncio.TimeoutError:
-                    break
-                except Exception:
-                    break
-                else:
-                    try:
-                        offsets.append(float(value))
-                    except Exception:
-                        continue
-            return offsets
-
-        manager = TimeSyncManager(
-            device_id=device_id or player,
-            measure_fn=measure,
-            max_samples=20,
-            sample_timeout=0.25,
+    def _setup_time_sync(self, player: str, device_key: str, device: Any) -> None:
+        calibrator = make_timesync(
+            device,
+            device_key,
+            min_samples=10,
+            max_samples=40,
+            rtt_ms_max=120.0,
+            offset_ms_abs_max=250.0,
         )
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                manager.initial_sync(), self._async_loop
+        self.time_sync = calibrator
+        self._time_sync[device_key] = calibrator
+        self.time_offset_ms.setdefault(device_key, 0.0)
+
+        async def _calibrate() -> Optional[object]:
+            try:
+                result = await calibrator.calibrate()
+            except Exception as exc:
+                log.warning("TimeSync calibration failed for %s: %s", device_key, exc)
+                return None
+            self.time_offset_ms[device_key] = result.median_offset_ms
+            log.info(
+                "TimeSync OK %s: median=%.2f ms, iqr=%.2f ms, rms_rtt=%.2f ms, accepted=%d/%d",
+                device_key,
+                result.median_offset_ms,
+                result.iqr_ms,
+                result.rms_rtt_ms,
+                result.accepted,
+                result.total,
             )
-            future.result(timeout=self._connect_timeout)
-        except Exception as exc:
-            log.warning("Initial time sync failed for %s: %s", player, exc)
-        self._time_sync[player] = manager
+            return result
+
+        future = asyncio.run_coroutine_threadsafe(_calibrate(), self._async_loop)
+        self._time_sync_tasks[device_key] = future
 
     def _schedule_periodic_resync(self, player: str) -> None:
         # Deaktiviert: kein periodischer Re-Sync mehr
@@ -689,53 +736,117 @@ class PupilBridge:
         return RecordingController(client, logger)
 
     def _probe_capabilities(
-        self, player: str, cfg: NeonDeviceConfig, device_id: str
+        self, player: str, device: Any, device_key: str
     ) -> None:
-        identifier = device_id or player
-        supports_frame_name = False
-        if cfg.ip and cfg.port is not None:
-            url = f"http://{cfg.ip}:{cfg.port}/api/capabilities"
-            response: Optional[Response] = None
-            try:
-                response = _HTTP_SESSION.head(url, timeout=self._http_timeout)
-            except Exception as exc:
-                log.debug(
-                    "Capabilities probe failed for %s endpoint=%s: %s",
-                    player,
-                    url,
-                    exc,
-                )
-            else:
-                if response.status_code == 405:
-                    try:
-                        response = _HTTP_SESSION.get(
-                            url, timeout=self._http_timeout
-                        )
-                    except Exception as exc:
-                        log.debug(
-                            "Capabilities probe GET failed for %s endpoint=%s: %s",
-                            player,
-                            url,
-                            exc,
-                        )
-                        response = None
-            if response is not None:
-                status = response.status_code
-                if status in (200, 204):
-                    supports_frame_name = True
-                elif 400 <= status < 500:
-                    log.info(
-                        "Capabilities probe client error endpoint=%s status=%s body=%s",
-                        url,
-                        status,
-                        _response_preview(response),
-                    )
-        caps = DeviceCapabilities(supports_frame_name=supports_frame_name)
-        self._capabilities.set(identifier, caps)
-        if not supports_frame_name:
-            log.info("frame_name skipped (unsupported) device=%s", player)
+        status_payload = self._latest_status_payload(player)
+        if status_payload is None:
+            status_payload = self._pull_status_payload_from_device(player, device)
+        frame_name = self._extract_frame_name_from_status(status_payload)
+        if frame_name:
+            log.info(
+                "frame_name from status for device=%s: %s",
+                device_key or player,
+                frame_name,
+            )
+        else:
+            log.info("frame_name not present in status; proceeding")
 
-    def _get_device_status(self, device: Any) -> Optional[Any]:
+    def _remember_status_payload(self, player: Optional[str], status: Any) -> None:
+        if not player:
+            return
+        if status is None:
+            return
+        self._status_payload_cache[player] = status
+
+    def _latest_status_payload(self, player: str) -> Optional[Any]:
+        return self._status_payload_cache.get(player)
+
+    def _pull_status_payload_from_device(
+        self, player: Optional[str], device: Any
+    ) -> Optional[Any]:
+        payload = self._probe_status_attributes(device)
+        if payload is not None:
+            self._remember_status_payload(player, payload)
+            return payload
+        payload = self._get_device_status(device, player)
+        if payload is not None:
+            self._remember_status_payload(player, payload)
+        return payload
+
+    def _probe_status_attributes(self, device: Any) -> Optional[Any]:
+        candidates = (
+            "latest_status",
+            "last_status",
+            "last_status_payload",
+            "status_payload",
+            "status_payloads",
+            "status_updates",
+            "status_events",
+            "status_queue",
+            "status_stream",
+        )
+        for attr in candidates:
+            try:
+                value = getattr(device, attr)
+            except Exception:
+                continue
+            if callable(value):
+                try:
+                    value = value()
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+            payload = self._coerce_status_payload(value)
+            if payload is not None:
+                return payload
+        return None
+
+    def _coerce_status_payload(self, value: Any) -> Optional[Any]:
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            return dict(value)
+        if isinstance(value, list):
+            if not value:
+                return None
+            for item in reversed(value):
+                candidate = self._coerce_status_payload(item)
+                if candidate is not None:
+                    return candidate
+            return None
+        if isinstance(value, tuple):
+            return self._coerce_status_payload(list(value))
+        if isinstance(value, deque):
+            if not value:
+                return None
+            for item in reversed(value):
+                candidate = self._coerce_status_payload(item)
+                if candidate is not None:
+                    return candidate
+            return None
+        queue_buffer = getattr(value, "queue", None)
+        if queue_buffer is None:
+            queue_buffer = getattr(value, "_queue", None)
+        if isinstance(queue_buffer, deque):
+            if not queue_buffer:
+                return None
+            for item in reversed(queue_buffer):
+                candidate = self._coerce_status_payload(item)
+                if candidate is not None:
+                    return candidate
+            return None
+        if isinstance(value, (set, frozenset)):
+            for item in value:
+                candidate = self._coerce_status_payload(item)
+                if candidate is not None:
+                    return candidate
+            return None
+        if isinstance(value, (str, bytes)):
+            return None
+        return None
+
+    def _get_device_status(self, device: Any, player: Optional[str] = None) -> Optional[Any]:
         for attr in ("api_status", "status", "get_status"):
             status_fn = getattr(device, attr, None)
             if not callable(status_fn):
@@ -748,9 +859,12 @@ class PupilBridge:
             if result is None:
                 continue
             if isinstance(result, dict):
+                self._remember_status_payload(player, result)
                 return result
             if isinstance(result, (list, tuple)):
-                return list(result)
+                payload = list(result)
+                self._remember_status_payload(player, payload)
+                return payload
             if isinstance(result, str):
                 try:
                     parsed = json.loads(result)
@@ -758,6 +872,7 @@ class PupilBridge:
                     continue
                 else:
                     if isinstance(parsed, (dict, list)):
+                        self._remember_status_payload(player, parsed)
                         return parsed
             to_dict = getattr(result, "to_dict", None)
             if callable(to_dict):
@@ -766,6 +881,7 @@ class PupilBridge:
                 except Exception:
                     continue
                 if isinstance(converted, (dict, list)):
+                    self._remember_status_payload(player, converted)
                     return converted
             as_dict = getattr(result, "_asdict", None)
             if callable(as_dict):
@@ -774,6 +890,7 @@ class PupilBridge:
                 except Exception:
                     continue
                 if isinstance(converted, (dict, list)):
+                    self._remember_status_payload(player, converted)
                     return converted
         return None
 
@@ -844,6 +961,47 @@ class PupilBridge:
             log.debug("Konnte Statusinformationen nicht vollständig auswerten", exc_info=True)
 
         return device_id, module_serial
+
+    def _extract_frame_name_from_status(self, status: Any) -> Optional[str]:
+        def _coerce(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except Exception:
+                    return None
+            text = str(value).strip()
+            return text or None
+
+        keys_to_check = (
+            "frame_name",
+            "frameName",
+            "hardware_model",
+            "hardwareModel",
+            "hardware",
+            "model",
+        )
+
+        def _search(payload: Any) -> Optional[str]:
+            if isinstance(payload, dict):
+                for key in keys_to_check:
+                    if key in payload:
+                        candidate = _coerce(payload.get(key))
+                        if candidate:
+                            return candidate
+                for value in payload.values():
+                    candidate = _search(value)
+                    if candidate:
+                        return candidate
+            elif isinstance(payload, (list, tuple)):
+                for item in payload:
+                    candidate = _search(item)
+                    if candidate:
+                        return candidate
+            return None
+
+        return _search(status)
 
     def _coerce_identity_value(self, value: Any) -> Optional[str]:
         if value is None:
@@ -1041,40 +1199,45 @@ class PupilBridge:
         for device in found_devices:
             info = self._inspect_discovered_device(device)
             device_id = info.get("device_id")
-            if not device_id:
-                log.debug("Skipping device ohne device_id: %r", device)
-                continue
-            player = self._device_id_to_player.get(device_id.lower())
-            if not player:
-                log.info("Ignoring unmapped device with device_id %s", device_id)
-                continue
-            cfg = NeonDeviceConfig(player=player, device_id=device_id)
-            cfg.ip = (info.get("ip") or "").strip()
+            ip = (info.get("ip") or "").strip()
             port_info = info.get("port")
             if isinstance(port_info, str):
                 try:
-                    cfg.port = int(port_info)
+                    port = int(port_info)
                 except ValueError:
-                    cfg.port = None
+                    port = None
             else:
-                cfg.port = port_info
+                port = port_info
+            if ip and port is None:
+                port = 8080
+            port_value = port if port is not None else 0
+            base_key = device_key_from(ip, int(port_value), device_id)
+            key_lookup = base_key.lower()
+            player = self._device_key_to_player.get(key_lookup)
+            if not player:
+                log.info("Ignoring unmapped device with key %s", base_key)
+                continue
+            cfg = NeonDeviceConfig(player=player, device_id=device_id or "")
+            cfg.ip = ip
+            cfg.port = port
             if cfg.ip and cfg.port is None:
                 cfg.port = 8080
             try:
                 prepared = self._ensure_device_connection(device)
-                actual_id = self._validate_device_identity(prepared, cfg)
+                identity = self._validate_device_identity(prepared, cfg)
                 self._device_by_player[player] = prepared
+                device_key = self._resolve_device_key(cfg, identity)
                 log.info(
-                    "Verbunden mit %s (ip=%s, port=%s, device_id=%s)",
+                    "Verbunden mit %s (ip=%s, port=%s, device_key=%s)",
                     player,
                     cfg.ip or "-",
                     cfg.port,
-                    actual_id,
+                    device_key,
                 )
-                self._on_device_connected(player, prepared, cfg, actual_id)
+                self._on_device_connected(player, prepared, cfg, device_key)
                 self._auto_start_recording(player, prepared)
             except Exception as exc:  # pragma: no cover - hardware dependent
-                log.warning("Gerät %s konnte nicht verbunden werden: %s", device_id, exc)
+                log.warning("Gerät %s konnte nicht verbunden werden: %s", base_key, exc)
 
         missing_players = [player for player, device in self._device_by_player.items() if device is None]
         if missing_players:
@@ -1138,6 +1301,10 @@ class PupilBridge:
         for player in list(self._active_recording):
             self._active_recording[player] = False
         self._recording_metadata.clear()
+        self._player_device_key.clear()
+        self._assigned_device_keys.clear()
+        self._device_key_usage.clear()
+        self.time_offset_ms.clear()
 
     # ------------------------------------------------------------------
     # Recording helpers
@@ -1547,11 +1714,6 @@ class PupilBridge:
         if not label:
             return
 
-        identifier = self._player_device_id.get(player, "") or player
-        caps = self._capabilities.get(identifier)
-        if not caps.supports_frame_name:
-            log.debug("frame_name skipped (unsupported) device=%s", player)
-
         payload: Dict[str, Any] = {"label": label}
         if session is not None:
             payload["session"] = session
@@ -1819,31 +1981,32 @@ class PupilBridge:
         payload_json: Optional[str] = None
         prepared_payload: Dict[str, Any] = dict(event.payload or {})
         include_timestamp = event.timestamp_policy is TimestampPolicy.CLIENT_CORRECTED
-        offset_ns = 0
         if include_timestamp:
-            offset_ns = self.get_device_offset_ns(player)
-            if abs(offset_ns) > 5_000_000_000:
-                if player not in self._offset_anomaly_warned:
-                    log.warning(
-                        "Large clock offset for %s (offset_ns=%d) – keeping client-side timestamps and triggering resync",
-                        player,
-                        offset_ns,
-                    )
-                    self._offset_anomaly_warned.add(player)
-                # Sofortige Re-Sync-Anfrage anstoßen (non-blocking best effort)
-                manager = self._time_sync.get(player)
-                try:
-                    if manager is not None:
-                        # bevorzugt: asap einmalig messen
-                        asyncio.run_coroutine_threadsafe(
-                            manager.maybe_resync(), self._async_loop
-                        )
-                except Exception:
-                    pass
-        if include_timestamp:
-            host_now_unix_ns = now_ns()
+            device_key = self._player_device_key.get(player)
+            offset_ms = self.time_offset_ms.get(device_key, 0.0) if device_key else 0.0
+            offset_ns = int(offset_ms * 1_000_000.0)
+            if abs(offset_ns) > 5_000_000_000 and player not in self._offset_anomaly_warned:
+                log.warning(
+                    "Large clock offset for %s (offset_ns=%d) – keeping client-side timestamps",
+                    player,
+                    offset_ns,
+                )
+                self._offset_anomaly_warned.add(player)
             prepared_payload.pop("timestamp_ns", None)
-            prepared_payload["event_timestamp_unix_ns"] = host_now_unix_ns - offset_ns
+            corrected_ns: int
+            if device_key and device_key in self._time_sync and device_key in self.time_offset_ms:
+                calibrator = self._time_sync.get(device_key)
+                if calibrator is not None:
+                    self.time_sync = calibrator
+                    device_ts_ns = now_ns() - offset_ns
+                    corrected_ns = self.time_sync.apply_ns(
+                        device_ts_ns, self.time_offset_ms[device_key]
+                    )
+                else:
+                    corrected_ns = now_ns()
+            else:
+                corrected_ns = now_ns()
+            prepared_payload["event_timestamp_unix_ns"] = corrected_ns
         else:
             prepared_payload.pop("timestamp_ns", None)
             prepared_payload.pop("event_timestamp_unix_ns", None)
@@ -2036,25 +2199,19 @@ class PupilBridge:
 
     # ------------------------------------------------------------------
     def get_device_offset_ns(self, player: str) -> int:
-        manager = self._time_sync.get(player)
-        if manager is None:
-            injected = getattr(self, "time_sync", None)
-            if isinstance(injected, TimeSyncManager):
-                manager = injected
-        if manager is None:
+        device_key = self._player_device_key.get(player)
+        if not device_key:
             return 0
-        offset_fn = getattr(manager, "get_offset_ns", None)
-        if callable(offset_fn):
-            try:
-                offset_value = int(offset_fn())
-            except Exception:
-                offset_value = 0
-        else:
-            try:
-                offset_value = int(round(-manager.get_offset_s() * 1_000_000_000))
-            except Exception:
-                offset_value = 0
-        return offset_value
+        offset_ms = self.time_offset_ms.get(device_key)
+        if offset_ms is None:
+            calibrator = self._time_sync.get(device_key)
+            if calibrator is not None:
+                self.time_sync = calibrator
+        offset_ms = self.time_offset_ms.get(device_key, 0.0)
+        try:
+            return int(offset_ms * 1_000_000.0)
+        except Exception:
+            return 0
 
     def estimate_time_offset(self, player: str) -> Optional[float]:
         """Return device_time - host_time in seconds if available.
@@ -2066,23 +2223,28 @@ class PupilBridge:
         reconciler lock the sign if required.
         """
 
-        manager = self._time_sync.get(player)
-        if manager is None:
+        device_key = self._player_device_key.get(player)
+        if not device_key:
+            return None
+        calibrator = self._time_sync.get(device_key)
+        if calibrator is None:
             device = self._device_by_player.get(player)
             if device is None:
                 return None
-            device_id = self._player_device_id.get(player, "") or player
-            self._setup_time_sync(player, device_id, device)
-            manager = self._time_sync.get(player)
-            if manager is None:
+            self._setup_time_sync(player, device_key, device)
+            calibrator = self._time_sync.get(device_key)
+            if calibrator is None:
                 return None
-        try:
-            asyncio.run_coroutine_threadsafe(
-                manager.maybe_resync(), self._async_loop
-            )
-        except Exception:
-            pass
-        return manager.get_offset_s()
+        future = self._time_sync_tasks.get(device_key)
+        if future is not None and not future.done():
+            try:
+                future.result(timeout=self._connect_timeout)
+            except Exception:
+                pass
+        offset_ms = self.time_offset_ms.get(device_key)
+        if offset_ms is None:
+            return None
+        return offset_ms / 1000.0
 
     def is_connected(self, player: str) -> bool:
         """Return whether the given player has an associated device."""

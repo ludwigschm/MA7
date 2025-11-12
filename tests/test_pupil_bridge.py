@@ -2,11 +2,23 @@ import json
 import math
 import statistics
 from pathlib import Path
+import asyncio
+from types import SimpleNamespace
 from typing import Iterator, Tuple
 
 import pytest
 
-from tabletop.pupil_bridge import NeonDeviceConfig, PupilBridge
+from tabletop.pupil_bridge import (
+    NeonDeviceConfig,
+    PupilBridge,
+    device_key_from,
+)
+
+
+class _FakeEstimate:
+    def __init__(self, offset_ms: float, rtt_ms: float = 10.0) -> None:
+        self.time_offset_ms = SimpleNamespace(mean=offset_ms)
+        self.roundtrip_duration_ms = SimpleNamespace(mean=rtt_ms)
 
 
 class _FakeDevice:
@@ -16,7 +28,7 @@ class _FakeDevice:
         self.cancel_calls = 0
         self.active = False
         self.offset_index = 0
-        self.offset_samples = [0.01 + i * 0.0005 for i in range(20)]
+        self.offset_samples_ms = [10.0 + i * 0.5 for i in range(20)]
         self._notifications: dict[str, object] = {"recording.begin": {"recording_id": "fake"}}
 
     def recording_start(self) -> None:
@@ -34,12 +46,13 @@ class _FakeDevice:
     def wait_for_notification(self, event: str, timeout: float = 0.5) -> object:
         return self._notifications.get(event)
 
-    def estimate_time_offset(self) -> float:
-        if self.offset_index < len(self.offset_samples):
-            value = self.offset_samples[self.offset_index]
-            self.offset_index += 1
-            return value
-        return self.offset_samples[-1]
+    async def estimate_time_offset(self) -> _FakeEstimate:
+        await asyncio.sleep(0)
+        value = self.offset_samples_ms[
+            self.offset_index % len(self.offset_samples_ms)
+        ]
+        self.offset_index += 1
+        return _FakeEstimate(value)
 
     def send_event(self, *args, **kwargs) -> None:
         self.events.append((args, kwargs))
@@ -82,7 +95,8 @@ def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
     device = _FakeDevice()
     cfg = NeonDeviceConfig(player="VP1", ip="127.0.0.1", port=8080)
     bridge._device_by_player["VP1"] = device  # type: ignore[attr-defined]
-    bridge._on_device_connected("VP1", device, cfg, "dev-1")  # type: ignore[attr-defined]
+    device_key = device_key_from(cfg.ip, cfg.port or 0, None)
+    bridge._on_device_connected("VP1", device, cfg, device_key)  # type: ignore[attr-defined]
     bridge.ready.set()
     yield bridge, device
     bridge.close()
@@ -159,8 +173,9 @@ def test_recording_cancel_clears_state(bridge):
 
 def test_time_sync_manager_used_for_offsets(bridge):
     pupil_bridge, device = bridge
+    assert pupil_bridge._player_device_key["VP1"] == "127.0.0.1:8080"
     offset = pupil_bridge.estimate_time_offset("VP1")
-    expected = statistics.median(device.offset_samples)
+    expected = statistics.median(device.offset_samples_ms) / 1000.0
     assert offset == pytest.approx(expected)
     # subsequent call should not error even if samples exhausted
     offset2 = pupil_bridge.estimate_time_offset("VP1")
