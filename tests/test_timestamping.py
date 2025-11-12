@@ -83,3 +83,12 @@ def test_ui_event_client_corrected_timestamp(
     payload = json.loads(encoded)
     assert "event_timestamp_unix_ns" in payload
     assert abs(payload["event_timestamp_unix_ns"] - ground_truth) <= 1_500_000
+
+
+def test_policy_falls_back_when_timesync_unstable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.event_router.get_health",
+        lambda: {"rms_ms": 5.0, "offset_jump_ms_last": 10.0, "is_stable": False},
+    )
+    assert policy_for("ui.test") is TimestampPolicy.ARRIVAL
+    assert policy_for("ui.stim_onset") is TimestampPolicy.CLIENT_CORRECTED
