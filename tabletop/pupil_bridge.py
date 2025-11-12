@@ -1839,14 +1839,23 @@ class PupilBridge:
         if include_timestamp:
             offset_ns = self.get_device_offset_ns(player)
             if abs(offset_ns) > 5_000_000_000:
-                include_timestamp = False
                 if player not in self._offset_anomaly_warned:
                     log.warning(
-                        "Ignoring large clock offset for %s (offset_ns=%d) – falling back to arrival timestamps",
+                        "Large clock offset for %s (offset_ns=%d) – keeping client-side timestamps and triggering resync",
                         player,
                         offset_ns,
                     )
                     self._offset_anomaly_warned.add(player)
+                # Sofortige Re-Sync-Anfrage anstoßen (non-blocking best effort)
+                manager = self._time_sync.get(player)
+                try:
+                    if manager is not None:
+                        # bevorzugt: asap einmalig messen
+                        asyncio.run_coroutine_threadsafe(
+                            manager.maybe_resync(), self._async_loop
+                        )
+                except Exception:
+                    pass
         if include_timestamp:
             host_now_unix_ns = time.time_ns()
             prepared_payload.pop("timestamp_ns", None)
