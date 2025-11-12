@@ -9,6 +9,7 @@ class _IdempotentClient:
     def __init__(self) -> None:
         self.started = False
         self.start_attempts = 0
+        self.cancel_attempts = 0
 
     async def is_recording(self) -> bool:
         return self.started
@@ -23,11 +24,16 @@ class _IdempotentClient:
     async def recording_stop(self) -> None:
         self.started = False
 
+    async def recording_cancel(self) -> None:
+        self.cancel_attempts += 1
+        self.started = False
+
 
 class _TransientClient:
     def __init__(self) -> None:
         self.started = False
         self.start_attempts = 0
+        self.cancel_attempts = 0
 
     async def is_recording(self) -> bool:
         return self.started
@@ -42,6 +48,10 @@ class _TransientClient:
         return {"recording_id": "fresh"}
 
     async def recording_stop(self) -> None:
+        self.started = False
+
+    async def recording_cancel(self) -> None:
+        self.cancel_attempts += 1
         self.started = False
 
 
@@ -120,3 +130,15 @@ def test_recording_session_stops_on_exception():
         asyncio.run(runner())
 
     assert bridge.events[-1] == "stop:VP2"
+
+
+def test_cancel_resets_controller_state():
+    client = _TransientClient()
+    controller = RecordingController(client)
+    client.started = True
+    controller._active = True  # type: ignore[attr-defined]
+
+    asyncio.run(controller.cancel())
+
+    assert controller._active is False  # type: ignore[attr-defined]
+    assert client.cancel_attempts == 1

@@ -464,7 +464,7 @@ class TabletopRoot(FloatLayout):
             log.debug("%s completed in %.3f ms", name, duration_ms)
             self._handler_log_gate[name] = now
 
-    def stop_bridge_recordings(self) -> None:
+    def stop_bridge_recordings(self, *, discard: bool = False) -> None:
         if not self._bridge_recordings_active:
             self._bridge_recording_block = None
             return
@@ -476,12 +476,20 @@ class TabletopRoot(FloatLayout):
 
         for player in list(self._bridge_recordings_active):
             try:
-                self._bridge.stop_recording(player)
+                if discard:
+                    self._bridge.recording_cancel(player)
+                else:
+                    self._bridge.stop_recording(player)
             finally:
                 self._bridge_recordings_active.discard(player)
 
         self._bridge_recording_block = None
         self._mark_bridge_dirty()
+
+    def abort_block(self) -> None:
+        """Abort the active block, discarding any ongoing recordings."""
+
+        self.stop_bridge_recordings(discard=True)
 
     def _resolve_event_logger(self) -> Optional[EventLogger]:
         logger_obj = getattr(self, "logger", None)
