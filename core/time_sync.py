@@ -21,6 +21,7 @@ __all__ = [
     "TimeSyncSampleError",
     "get_offset_ns",
     "get_offset_ns_for_event",
+    "get_health",
     "get_rms_ms",
     "get_state",
     "should_swap",
@@ -31,6 +32,8 @@ DRIFT_THRESHOLD_S = float(TIMESYNC_DRIFT_THRESHOLD_MS) / 1000.0
 MAX_SAMPLES = 64
 RMS_REFINE_THRESHOLD_S = 0.0015
 ABSURD_OFFSET_NS = 5_000_000_000
+STABLE_RMS_THRESHOLD_MS = 2.0
+STABLE_JUMP_THRESHOLD_MS = 3.0
 
 
 class TimeSyncSampleError(RuntimeError):
@@ -43,6 +46,13 @@ class OffsetState:
     rms_ns: int
     seq: int
     updated_at_mono_ns: int
+
+
+@dataclass(frozen=True)
+class HealthState:
+    rms_ms: float
+    offset_jump_ms_last: float
+    is_stable: bool
 
 
 class AtomicRef:
@@ -69,6 +79,13 @@ _offset_state = AtomicRef(
     )
 )
 _absurd_logged = AtomicRef(False)
+_health_state = AtomicRef(
+    HealthState(
+        rms_ms=0.0,
+        offset_jump_ms_last=0.0,
+        is_stable=True,
+    )
+)
 
 
 def get_state() -> OffsetState:
@@ -95,6 +112,17 @@ def get_rms_ms() -> float:
     """Return the RMS jitter in milliseconds."""
 
     return _offset_state.load().rms_ns / 1_000_000.0
+
+
+def get_health() -> dict[str, float | bool]:
+    """Return the current time synchronisation health state."""
+
+    health = _health_state.load()
+    return {
+        "rms_ms": health.rms_ms,
+        "offset_jump_ms_last": health.offset_jump_ms_last,
+        "is_stable": health.is_stable,
+    }
 
 
 def should_swap(old: OffsetState, new: OffsetState) -> bool:
@@ -208,15 +236,37 @@ class TimeSyncManager:
                     exc,
                 )
                 state = _offset_state.load()
+                prev_health = _health_state.load()
+                current_rms_ms = state.rms_ns / 1_000_000.0
+                _health_state.store(
+                    HealthState(
+                        rms_ms=current_rms_ms,
+                        offset_jump_ms_last=prev_health.offset_jump_ms_last,
+                        is_stable=
+                        abs(current_rms_ms) <= STABLE_RMS_THRESHOLD_MS
+                        and abs(prev_health.offset_jump_ms_last) <= STABLE_JUMP_THRESHOLD_MS,
+                    )
+                )
                 return state.median_ns, state.rms_ns
 
             old_state = _offset_state.load()
+            jump_ms = 0.0
+            if old_state.seq != 0:
+                jump_ms = (new_state.median_ns - old_state.median_ns) / 1_000_000.0
+            rms_ms = new_state.rms_ns / 1_000_000.0
+            is_stable = abs(rms_ms) <= STABLE_RMS_THRESHOLD_MS and abs(jump_ms) <= STABLE_JUMP_THRESHOLD_MS
+            _health_state.store(
+                HealthState(
+                    rms_ms=rms_ms,
+                    offset_jump_ms_last=jump_ms,
+                    is_stable=is_stable,
+                )
+            )
             if should_swap(old_state, new_state):
                 _offset_state.store(new_state)
                 if abs(new_state.median_ns) <= ABSURD_OFFSET_NS:
                     _absurd_logged.store(False)
                 median_ms = new_state.median_ns / 1_000_000.0
-                rms_ms = new_state.rms_ns / 1_000_000.0
                 metrics.gauge(
                     "timesync_rms_ms",
                     rms_ms,
