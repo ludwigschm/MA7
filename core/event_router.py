@@ -9,14 +9,22 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import Callable, Deque, Dict, Literal, Sequence
 
 import metrics
 
 from .config import EVENT_NORMAL_BATCH_INTERVAL_S, EVENT_NORMAL_MAX_BATCH
 
-__all__ = ["Priority", "UIEvent", "EventRouter", "classify_event", "debounce"]
+__all__ = [
+    "Priority",
+    "TimestampPolicy",
+    "UIEvent",
+    "EventRouter",
+    "classify_event",
+    "debounce",
+    "policy_for",
+]
 
 
 log = logging.getLogger(__name__)
@@ -34,12 +42,23 @@ _HIGH_PRIORITY_PATTERN = re.compile(
 )
 
 
+TimestampPolicy = Enum("TimestampPolicy", ["ARRIVAL", "CLIENT_CORRECTED"])
+
+
 def classify_event(name: str) -> Priority:
     """Classify an event by name into a :class:`Priority`."""
 
     if _HIGH_PRIORITY_PATTERN.match(name):
         return Priority.HIGH
     return Priority.NORMAL
+
+
+def policy_for(name: str) -> TimestampPolicy:
+    """Return the timestamping policy to use for an event name."""
+
+    if name.startswith(("device.", "sensor.")):
+        return TimestampPolicy.ARRIVAL
+    return TimestampPolicy.CLIENT_CORRECTED
 
 
 @dataclass(slots=True)
@@ -51,7 +70,7 @@ class UIEvent:
     target: str | None = None
     broadcast: bool = False
     priority: Priority | Literal["high", "normal", "low"] | None = None
-    use_arrival_time: bool = False
+    timestamp_policy: TimestampPolicy = TimestampPolicy.CLIENT_CORRECTED
 
 
 def debounce(name_pattern: str, window_ms: int) -> Callable[[Callable[..., object]], Callable[..., object]]:
@@ -99,7 +118,7 @@ def debounce(name_pattern: str, window_ms: int) -> Callable[[Callable[..., objec
                 event.target,
                 event.broadcast,
                 event.priority,
-                event.use_arrival_time,
+                event.timestamp_policy,
             )
             call_args = args
             call_kwargs = dict(kwargs)
