@@ -28,6 +28,7 @@ from core.clock import now_ns
 from tabletop.data.blocks import load_blocks, load_csv_rounds, value_to_card_path
 from tabletop.data.config import ARUCO_OVERLAY_PATH, ROOT
 from tabletop.logging import async_bridge
+from tabletop.logging.cloud_filter import classify_cloud_logging
 from tabletop.logging.events_bridge import push_async
 from tabletop.logging.events import Events
 from tabletop.logging.round_csv import (
@@ -2082,6 +2083,9 @@ class TabletopRoot(FloatLayout):
         event_id = event_id or str(uuid.uuid4())
         payload_dict.setdefault("event_id", event_id)
         payload_dict.setdefault("phase", phase)
+
+        send_to_cloud, enqueue_marker = classify_cloud_logging(action, payload_dict)
+
         actor = self._actor_label(player)
         round_idx = max(0, self.round - 1)
         event_payload = {
@@ -2103,6 +2107,10 @@ class TabletopRoot(FloatLayout):
         )
         record = self.logger.log_event(event_payload, blocking=effective_blocking)
         write_round_log(self, actor, action, payload_dict, player)
+
+        if not (send_to_cloud or enqueue_marker):
+            return record
+
         base = self._bridge_payload_base(player=None)
         cloud_event = {k: base[k] for k in ("session", "block", "player") if k in base}
         cloud_event.update(
@@ -2122,8 +2130,10 @@ class TabletopRoot(FloatLayout):
             if key in payload_dict:
                 cloud_event[key] = payload_dict[key]
         cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS}
-        push_async(cloud_event)
-        if self.marker_bridge and action != "round_start":
+
+        if send_to_cloud:
+            push_async(cloud_event)
+        if enqueue_marker and self.marker_bridge:
             self.marker_bridge.enqueue(f"action.{action}", cloud_event)
         return record
 
