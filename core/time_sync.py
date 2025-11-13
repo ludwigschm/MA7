@@ -16,6 +16,7 @@ from .logging import get_logger
 from .clock import now_ns, now_mono_ns
 
 __all__ = [
+    "AsyncSimpleDeviceWrapper",
     "AtomicRef",
     "OffsetState",
     "TimeSyncHealthSampler",
@@ -32,6 +33,43 @@ __all__ = [
     "get_state",
     "should_swap",
 ]
+
+
+class AsyncSimpleDeviceWrapper:
+    """Adapt a Pupil Labs Simple API device for safe async usage.
+
+    The Simple API exposes :meth:`estimate_time_offset` as a synchronous method
+    that internally calls :func:`asyncio.run`.  When invoked from within an
+    existing event loop this raises ``RuntimeError: asyncio.run() cannot be
+    called from a running event loop``.  Wrapping the device allows the method
+    to execute inside a worker thread while presenting an ``async`` interface to
+    the rest of the time-sync stack.
+    """
+
+    def __init__(self, device: Any) -> None:
+        self._device = device
+
+    def _estimate_blocking(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._device.estimate_time_offset(*args, **kwargs)
+        if asyncio.iscoroutine(result):
+            return asyncio.run(result)
+        return result
+
+    async def estimate_time_offset(self, *args: Any, **kwargs: Any) -> Any:
+        """Run the blocking Simple-API method inside the default executor."""
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self._estimate_blocking,
+            *args,
+            **kwargs,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to the wrapped device."""
+
+        return getattr(self._device, name)
 
 RESYNC_INTERVAL_S = float(TIMESYNC_RESYNC_INTERVAL_S)
 DRIFT_THRESHOLD_S = float(TIMESYNC_DRIFT_THRESHOLD_MS) / 1000.0

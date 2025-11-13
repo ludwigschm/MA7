@@ -9,7 +9,7 @@ import logging
 import sys
 from types import SimpleNamespace
 
-from core.time_sync import make_timesync
+from core.time_sync import AsyncSimpleDeviceWrapper, make_timesync
 from tabletop.pupil_bridge import PupilBridge, NeonDeviceConfig, device_key_from
 
 try:  # pragma: no cover - optional dependency for real devices
@@ -76,8 +76,10 @@ def main() -> int:
             device_key = device_key_from("mock", 0, None)
         bridge._device_by_player["VP1"] = device
 
+        calibrator_device = AsyncSimpleDeviceWrapper(device)
+
         calibrator = make_timesync(
-            device,
+            calibrator_device,
             device_key,
             min_samples=args.min_samples,
             max_samples=args.max_samples,
