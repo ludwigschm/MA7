@@ -1244,36 +1244,11 @@ class TabletopRoot(FloatLayout):
                 "accepted": True,
                 "both_pressed": both_pressed,
                 "in_block_pause": self.in_block_pause,
-                "in_round_pause": self.in_round_pause,
             }
 
             if both_pressed:
                 self.p1_pressed = False
                 self.p2_pressed = False
-                if self.in_round_pause:
-                    self.in_round_pause = False
-                    self.pause_message = ""
-                    self.update_pause_overlay()
-                    self.log_round_start_if_pending()
-                    self.prepare_next_round(start_immediately=True)
-                    outcome_payload.update({
-                        "resume": "round_pause",
-                        "next_phase": "next_round",
-                    })
-                    if not self._log_interaction_phase(
-                        who,
-                        action,
-                        outcome_payload,
-                        event_id=event_id,
-                        phase="action_applied",
-                        t_ns=now_ns(),
-                        t_utc_iso=datetime.utcnow().isoformat(),
-                        blocking=blocking,
-                        marker="OUTCOME_LOGGED_AFTER_LOGIC",
-                    ):
-                        return
-                    self.record_action(who, "Play gedrückt")
-                    return
                 if self.in_block_pause:
                     self.in_block_pause = False
                     self.pause_message = ""
@@ -1631,6 +1606,8 @@ class TabletopRoot(FloatLayout):
                 "Dieser Block ist vorbei. Nehmen Sie sich einen Moment zum Durchatmen.\n"
                 "Wenn Sie bereit sind, klicken Sie auf Weiter."
             )
+            self.phase = UXPhase.WAIT_BOTH_START
+            self.apply_phase()
             self.update_pause_overlay()
             self.update_user_displays()
             return
@@ -1937,24 +1914,28 @@ class TabletopRoot(FloatLayout):
         pause_cover = self.wid_safe('pause_cover')
         if pause_cover is None:
             return
+
         active = self.in_block_pause or self.session_finished
         buttons_active = self.in_block_pause
+
         if active:
-            # Ensure pause_cover is the topmost regular widget
-            if pause_cover.parent is None:
+            parent = pause_cover.parent
+            if parent is None:
                 self.add_widget(pause_cover)
-            else:
                 parent = pause_cover.parent
+            if parent is not None:
                 try:
                     parent.remove_widget(pause_cover)
                 except Exception:
                     pass
                 parent.add_widget(pause_cover)
 
-            # Start buttons should be above the overlay
-            self.bring_start_buttons_to_front()
             pause_cover.opacity = 1
             pause_cover.disabled = False
+
+            # Start buttons should be above the overlay
+            self.bring_start_buttons_to_front()
+
             for label_id in self.pause_labels.values():
                 lbl = self.wid_safe(label_id)
                 if lbl is not None:
@@ -1980,8 +1961,10 @@ class TabletopRoot(FloatLayout):
                 btn.opacity = 0
                 btn.disabled = True
                 btn.set_live(False)
+
             if pause_cover.parent is not None:
                 self.remove_widget(pause_cover)
+
             # Keep start buttons order consistent
             self.bring_start_buttons_to_front()
 
@@ -2257,7 +2240,6 @@ class TabletopRoot(FloatLayout):
         self.session_finished = False
         self.in_block_pause = False
         self.pause_message = ''
-        self.in_round_pause = False
         self.next_block_preview = None
         self.fixation_required = False
         self.pending_round_start_log = False
