@@ -588,45 +588,10 @@ class TabletopRoot(FloatLayout):
         player: Optional[int] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        payload: Dict[str, Any] = {"button": button}
-        phase = getattr(self.phase, "name", None)
-        if phase:
-            payload["phase"] = phase
-        try:
-            round_idx = max(0, getattr(self, "round", 1) - 1)
-        except Exception:
-            round_idx = 0
-        payload["round_index"] = round_idx
-        if player in (1, 2):
-            payload["game_player"] = player
-            role = self.player_roles.get(player)
-            if role is not None:
-                payload["player_role"] = role
-        if extra:
-            payload.update(extra)
-
-        actor = "SYS"
-        if player in (1, 2):
-            try:
-                actor = self._actor_label(player)
-            except Exception:
-                role = None
-                try:
-                    role = self.player_roles.get(player)
-                except Exception:
-                    role = None
-                if role == 1:
-                    actor = "P1"
-                elif role == 2:
-                    actor = "P2"
-                else:
-                    actor = "P1" if player == 1 else "P2"
-        payload["actor"] = actor
-
-        if self.marker_bridge:
-            self.marker_bridge.enqueue(f"button.{button}", payload)  # enriched payload (non-blocking)
-        else:
-            self.send_bridge_event(f"button.{button}", payload)
+        del button, player, extra  # inputs retained for backwards compatibility
+        # Button bridge events are now local-only. External forwarding was removed
+        # to avoid duplicate touches on Pupil/Neon bridges.
+        return
 
     # ------------------------------------------------------------------
     # Session helpers
@@ -1371,9 +1336,10 @@ class TabletopRoot(FloatLayout):
                 "card_slot": which,
                 "accepted": allowed_press,
             }
+            action_name = "reveal_inner" if which == "inner" else "reveal_outer"
             if not self._log_interaction_phase(
                 who,
-                "tap_card",
+                action_name,
                 input_payload,
                 event_id=event_id,
                 phase="input_received",
@@ -1410,14 +1376,6 @@ class TabletopRoot(FloatLayout):
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
             )
 
-            self._emit_button_bridge_event(
-                button_name,
-                player=who,
-                extra={
-                    "allowed": bool(result.allowed),
-                    "card_slot": which,
-                },
-            )
             if not result.allowed:
                 return
             widget = self.card_widget_for_player(who, which)
@@ -1478,15 +1436,6 @@ class TabletopRoot(FloatLayout):
                 t_utc_iso=datetime.utcnow().isoformat(),
                 blocking=blocking,
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
-            )
-
-            self._emit_button_bridge_event(
-                f"signal_{level}",
-                player=player,
-                extra={
-                    "accepted": bool(result.accepted),
-                    "signal_level": level,
-                },
             )
             if not result.accepted:
                 return
@@ -1554,15 +1503,6 @@ class TabletopRoot(FloatLayout):
                 t_utc_iso=datetime.utcnow().isoformat(),
                 blocking=blocking,
                 marker="OUTCOME_LOGGED_AFTER_LOGIC",
-            )
-
-            self._emit_button_bridge_event(
-                f"decision_{decision}",
-                player=player,
-                extra={
-                    "accepted": bool(result.accepted),
-                    "decision": decision,
-                },
             )
             if not result.accepted:
                 return
@@ -2093,9 +2033,10 @@ class TabletopRoot(FloatLayout):
                 "round_index": round_idx,
                 "actor": actor,
                 "event_id": event_id,
-                "phase": phase,
             }
         )
+        if phase == "input_received":
+            cloud_event["phase"] = phase
         if player is not None:
             cloud_event["game_player"] = player
         role_value = self.player_roles.get(player)
@@ -2105,9 +2046,18 @@ class TabletopRoot(FloatLayout):
             if key in payload_dict:
                 cloud_event[key] = payload_dict[key]
         cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS}
-        push_async(cloud_event)
-        if self.marker_bridge and action != "round_start":
-            self.marker_bridge.enqueue(f"action.{action}", cloud_event)
+        should_forward = phase == "input_received"
+        if not should_forward and action in {
+            "session_start",
+            "round_start",
+            "showdown",
+            "session_end",
+        }:
+            should_forward = True
+        if should_forward:
+            push_async(cloud_event)
+            if self.marker_bridge and action != "round_start":
+                self.marker_bridge.enqueue(f"action.{action}", cloud_event)
         return record
 
     def prompt_session_number(self):
