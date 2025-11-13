@@ -850,6 +850,15 @@ def _configure_async_logging() -> tuple[Optional[QueueListener], Optional[Queue]
         )
         handlers = [console]
 
+    # Suppress noisy per-response debug logs emitted by the Pupil Labs client while
+    # keeping warnings and errors visible.
+    for noisy_name in (
+        "Response",
+        "pupil_labs.realtime_api",
+        "pupil_labs.realtime_api.simple",
+    ):
+        logging.getLogger(noisy_name).setLevel(logging.WARNING)
+
     for handler in handlers:
         root_logger.removeHandler(handler)
 
