@@ -22,7 +22,7 @@ import metrics
 from core.device_registry import DeviceRegistry
 from core.event_router import EventRouter, TimestampPolicy, UIEvent, policy_for
 from core.recording import DeviceClient, RecordingController, RecordingHttpError
-from core.time_sync import make_timesync, OfficialTimeSync
+from core.time_sync import AsyncSimpleDeviceWrapper, OfficialTimeSync, make_timesync
 from core.clock import now_ns
 
 from core.http_client import get_sync_session
@@ -691,8 +691,10 @@ class PupilBridge:
         self._probe_capabilities(player, device, device_key)
 
     def _setup_time_sync(self, player: str, device_key: str, device: Any) -> None:
+        async_device = AsyncSimpleDeviceWrapper(device)
+
         calibrator = make_timesync(
-            device,
+            async_device,
             device_key,
             min_samples=10,
             max_samples=40,
