@@ -303,6 +303,7 @@ class PupilBridge:
         self._device_by_player: Dict[str, Any] = {"VP1": None, "VP2": None}
         self._active_recording: Dict[str, bool] = {"VP1": False, "VP2": False}
         self._recording_metadata: Dict[str, Dict[str, Any]] = {}
+        self._current_recording_label: Dict[str, tuple[int, int, str]] = {}
         self._auto_session: Optional[int] = None
         self._auto_block: Optional[int] = None
         self._auto_players: set[str] = set()
@@ -1250,6 +1251,7 @@ class PupilBridge:
         for player in list(self._active_recording):
             self._active_recording[player] = False
         self._recording_metadata.clear()
+        self._current_recording_label.clear()
         self._player_device_key.clear()
         self._assigned_device_keys.clear()
         self._device_key_usage.clear()
@@ -1372,6 +1374,24 @@ class PupilBridge:
     ) -> None:
         """Refresh the recording label for an already active recording."""
 
+        metadata = self._recording_metadata.get(player)
+        if metadata is None:
+            metadata = {"player": player}
+            self._recording_metadata[player] = metadata
+        metadata["session"] = session
+        metadata["block"] = block
+        metadata["recording_label"] = label
+
+        if self._current_recording_label.get(player) == (session, block, label):
+            log.debug(
+                "recording label unchanged player=%s label=%s session=%s block=%s",
+                player,
+                label,
+                session,
+                block,
+            )
+            return
+
         log.info(
             "recording label update requested player=%s label=%s session=%s block=%s",
             player,
@@ -1386,14 +1406,7 @@ class PupilBridge:
             session=session,
             block=block,
         )
-
-        metadata = self._recording_metadata.get(player)
-        if metadata is None:
-            metadata = {"player": player}
-            self._recording_metadata[player] = metadata
-        metadata["session"] = session
-        metadata["block"] = block
-        metadata["recording_label"] = label
+        self._current_recording_label[player] = (session, block, label)
 
     def _send_recording_start(
         self,
@@ -1722,6 +1735,7 @@ class PupilBridge:
             log.info("recording.cancel übersprungen (%s: nicht konfiguriert/verbunden)", player)
             self._active_recording[player] = False
             self._recording_metadata.pop(player, None)
+            self._current_recording_label.pop(player, None)
             controller = self._recording_controllers.get(player)
             if controller is not None:
                 try:
@@ -1794,6 +1808,7 @@ class PupilBridge:
 
         self._active_recording[player] = False
         self._recording_metadata.pop(player, None)
+        self._current_recording_label.pop(player, None)
         controller = self._recording_controllers.get(player)
         if controller is not None:
             try:
@@ -1843,6 +1858,7 @@ class PupilBridge:
         if player in self._active_recording:
             self._active_recording[player] = False
         self._recording_metadata.pop(player, None)
+        self._current_recording_label.pop(player, None)
 
     def connected_players(self) -> list[str]:
         """Return the players that currently have a connected device."""

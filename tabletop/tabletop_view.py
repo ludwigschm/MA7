@@ -323,25 +323,6 @@ class TabletopRoot(FloatLayout):
         if players_snapshot and "VP2" not in players_snapshot:
             log.info("Nur VP1 aktiv – VP2 deaktiviert")
 
-        if bridge is not None:
-            def _kick_autostart(_dt: float) -> None:
-                bridge_ref = self._bridge
-                if bridge_ref is None:
-                    return
-                selected = players_snapshot or (
-                    {self._bridge_player} if self._bridge_player else None
-                )
-                try:
-                    bridge_ref.ensure_recordings(
-                        session=self._bridge_session,
-                        block=self._bridge_block,
-                        players=selected,
-                    )
-                except AttributeError:
-                    pass
-
-            Clock.schedule_once(_kick_autostart, 0.2)
-
         self._mark_bridge_dirty()
         self._ensure_bridge_recordings()
 
@@ -429,6 +410,9 @@ class TabletopRoot(FloatLayout):
 
         for player in players:
             if player in self._bridge_recordings_active and not block_changed:
+                continue
+            if self._bridge.is_recording(player) and not block_changed:
+                self._bridge_recordings_active.add(player)
                 continue
             self._bridge.start_recording(session_value, block_value, player)
             if self._bridge.is_recording(player):
