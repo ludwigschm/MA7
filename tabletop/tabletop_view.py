@@ -587,6 +587,7 @@ class TabletopRoot(FloatLayout):
             bridge_ref = self._bridge
             if not bridge_ref:
                 return
+            use_arrival_time = None if self._time_offset_calibrated else True
             for player in players:
                 event_payload = self._bridge_payload_base(player=player)
                 event_payload.update(payload_copy)
@@ -599,6 +600,7 @@ class TabletopRoot(FloatLayout):
                         player,
                         event_payload,
                         priority=priority,
+                        use_arrival_time=use_arrival_time,
                     )
                 except Exception:
                     log.exception("Bridge event dispatch failed: %s", name)
