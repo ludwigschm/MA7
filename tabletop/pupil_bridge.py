@@ -1985,18 +1985,23 @@ class PupilBridge:
         if include_timestamp:
             device_key = self._player_device_key.get(player)
             if not device_key or device_key not in self._clock_offset_ns:
-                raise RuntimeError(
-                    "Clock-Offset fehlt – calibrate_time_offset() muss vor dem "
-                    "ersten Event erfolgreich abgeschlossen werden."
+                log.warning(
+                    "Clock-Offset missing for %s/%s (device_key=%r); "
+                    "falling back to ARRIVAL timestamps",
+                    player,
+                    name,
+                    device_key,
                 )
+                include_timestamp = False
+            else:
+                clock_offset_ns = self._clock_offset_ns[device_key]
+                host_now_ns = time.time_ns()
+                companion_time_ns = host_now_ns - clock_offset_ns
 
-            clock_offset_ns = self._clock_offset_ns[device_key]
-            host_now_ns = time.time_ns()
-            companion_time_ns = host_now_ns - clock_offset_ns
+                prepared_payload.pop("timestamp_ns", None)
+                prepared_payload["event_timestamp_unix_ns"] = companion_time_ns
 
-            prepared_payload.pop("timestamp_ns", None)
-            prepared_payload["event_timestamp_unix_ns"] = companion_time_ns
-        else:
+        if not include_timestamp:
             prepared_payload.pop("timestamp_ns", None)
             prepared_payload.pop("event_timestamp_unix_ns", None)
 
