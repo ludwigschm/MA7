@@ -80,7 +80,7 @@ def push_async(event: Dict[str, Any]) -> None:
     """Enqueue *event* for asynchronous delivery to the Pupil Labs Cloud."""
 
     if _client is None:
-        _log.warning("Pupil Labs Cloud client not initialized; cannot forward event")
+        _log.info("Pupil Labs Cloud client not initialized; cannot forward event")
         return
 
     payload = dict(event or {})
