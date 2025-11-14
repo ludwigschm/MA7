@@ -6,11 +6,11 @@ from typing import Any, Dict
 
 import requests
 
-__all__ = ["PupylabsCloudLogger"]
+__all__ = ["PupilLabsCloudLogger"]
 
 
-class PupylabsCloudLogger:
-    """Small synchronous client for forwarding events to Pupylabs Cloud."""
+class PupilLabsCloudLogger:
+    """Small synchronous client for forwarding events to the Pupil Labs Cloud."""
 
     def __init__(
         self,
@@ -28,7 +28,7 @@ class PupylabsCloudLogger:
         self.max_retries = max_retries
 
     def send(self, event: Dict[str, Any]) -> None:
-        """Send *event* to the Pupylabs ingest endpoint with retries."""
+        """Send *event* to the Pupil Labs Cloud ingest endpoint with retries."""
 
         payload: Dict[str, Any] = dict(event or {})
 
@@ -50,12 +50,12 @@ class PupylabsCloudLogger:
                 status = response.status_code
                 if 200 <= status < 300:
                     if self._log.isEnabledFor(logging.DEBUG):
-                        self._log.debug("Pupylabs ingest success: %s", status)
+                        self._log.debug("Pupil Labs Cloud ingest success: %s", status)
                     return
                 if 500 <= status < 600:
                     raise RuntimeError(f"server responded with {status}")
                 self._log.warning(
-                    "Pupylabs ingest non-success status: %s %s",
+                    "Pupil Labs Cloud ingest non-success status: %s %s",
                     status,
                     response.text[:200],
                 )
@@ -63,14 +63,16 @@ class PupylabsCloudLogger:
             except Exception as exc:  # pragma: no cover - network safety
                 if attempt >= self.max_retries:
                     self._log.error(
-                        "Pupylabs ingest failed after %s attempts: %r",
+                        "Pupil Labs Cloud ingest failed after %s attempts: %r",
                         attempt + 1,
                         exc,
                     )
                     return
                 if self._log.isEnabledFor(logging.DEBUG):
                     self._log.debug(
-                        "Pupylabs ingest attempt %s failed: %r", attempt + 1, exc
+                        "Pupil Labs Cloud ingest attempt %s failed: %r",
+                        attempt + 1,
+                        exc,
                     )
                 time.sleep(delay)
                 delay = min(delay * 2, 1.0)

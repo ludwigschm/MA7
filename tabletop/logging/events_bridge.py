@@ -5,14 +5,14 @@ from typing import Any, Dict, Optional
 
 from core.http_client import get_sync_session
 from tabletop.logging.async_bridge import enqueue
-from tabletop.logging.pupylabs_cloud import PupylabsCloudLogger
+from tabletop.logging.pupil_labs_cloud import PupilLabsCloudLogger
 
 __all__ = ["init_client", "push_async"]
 
 _log = logging.getLogger(__name__)
 
 _session = get_sync_session()
-_client: Optional[PupylabsCloudLogger] = None
+_client: Optional[PupilLabsCloudLogger] = None
 
 
 ALLOWED_KEYS = {
@@ -40,15 +40,15 @@ def init_client(
     timeout_s: float = 2.0,
     max_retries: int = 3,
 ) -> None:
-    """Initialize the shared Pupylabs client used by the UI bridge."""
+    """Initialize the shared Pupil Labs Cloud client used by the UI bridge."""
 
     global _client
     if not base_url or not api_key:
-        _log.debug("Pupylabs client disabled (missing configuration)")
+        _log.debug("Pupil Labs Cloud client disabled (missing configuration)")
         _client = None
         return
     try:
-        _client = PupylabsCloudLogger(
+        _client = PupilLabsCloudLogger(
             _session,
             base_url,
             api_key,
@@ -57,18 +57,19 @@ def init_client(
         )
     except Exception as exc:  # pragma: no cover - initialization safety
         _log.warning(
-            "Pupylabs client disabled after initialization failure: %s", exc,
+            "Pupil Labs Cloud client disabled after initialization failure: %s",
+            exc,
         )
         _client = None
         return
-    _log.info("Pupylabs client initialized for %s", base_url)
+    _log.info("Pupil Labs Cloud client initialized for %s", base_url)
 
 
 def push_async(event: Dict[str, Any]) -> None:
-    """Enqueue *event* for asynchronous delivery to Pupylabs Cloud."""
+    """Enqueue *event* for asynchronous delivery to the Pupil Labs Cloud."""
 
     if _client is None:
-        _log.debug("Pupylabs client not initialized; dropping event")
+        _log.debug("Pupil Labs Cloud client not initialized; dropping event")
         return
 
     payload = dict(event or {})
