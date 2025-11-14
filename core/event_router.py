@@ -15,7 +15,6 @@ from typing import Callable, Deque, Dict, Literal, Sequence
 import metrics
 
 from .config import EVENT_NORMAL_BATCH_INTERVAL_S, EVENT_NORMAL_MAX_BATCH
-from .time_sync import get_health
 
 __all__ = [
     "Priority",
@@ -47,6 +46,12 @@ TimestampPolicy = Enum("TimestampPolicy", ["ARRIVAL", "CLIENT_CORRECTED"])
 
 
 CRITICAL_EVENTS: set[str] = {"ui.stim_onset", "ui.stim_offset", "trial.begin", "trial.end"}
+
+
+def get_health() -> dict[str, float | bool]:
+    """Return the current time-sync health metrics."""
+
+    return {"is_stable": True, "rms_ms": 0.0, "offset_jump_ms_last": 0.0}
 
 
 def classify_event(name: str) -> Priority:

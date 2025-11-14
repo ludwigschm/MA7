@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from core.event_router import TimestampPolicy, policy_for
-from core.time_sync import TimeSyncManager
 from tabletop.pupil_bridge import PupilBridge
 
 
@@ -26,11 +25,8 @@ def bridge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PupilBridge:
     bridge = PupilBridge(device_mapping={}, config_path=config_path)
     device = _StubDevice()
     bridge._device_by_player["VP1"] = device  # type: ignore[attr-defined]
-    async def _measure(samples: int, timeout: float) -> list[float]:
-        return [0.0]
-
-    manager = TimeSyncManager("vp1", _measure)
-    bridge._time_sync["VP1"] = manager  # type: ignore[attr-defined]
+    bridge._player_device_key["VP1"] = "vp1"  # type: ignore[attr-defined]
+    bridge._clock_offset_ns["vp1"] = 0  # type: ignore[attr-defined]
     bridge.ready.set()
     yield bridge
     bridge.close()
@@ -61,15 +57,12 @@ def test_ui_event_client_corrected_timestamp(
 ) -> None:
     assert policy_for("ui.test") is TimestampPolicy.CLIENT_CORRECTED
 
+    device_key = bridge._player_device_key["VP1"]  # type: ignore[index]
     offset_ns = 123_456_789
     ground_truth = 1_000_000_000 - offset_ns
     host_now = ground_truth + offset_ns
-    monkeypatch.setattr("core.clock.now_ns", lambda: host_now)
-    monkeypatch.setattr("tabletop.pupil_bridge.now_ns", lambda: host_now)
-    monkeypatch.setattr("MA7_main.core.clock.now_ns", lambda: host_now)
-    monkeypatch.setattr(
-        TimeSyncManager, "get_offset_ns", lambda self: offset_ns, raising=False
-    )
+    bridge._clock_offset_ns[device_key] = offset_ns  # type: ignore[index]
+    monkeypatch.setattr("tabletop.pupil_bridge.time.time_ns", lambda: host_now)
 
     bridge.send_event("ui.test", "VP1", {})
     bridge._event_router.flush_all()  # type: ignore[attr-defined]

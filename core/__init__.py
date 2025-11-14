@@ -5,5 +5,4 @@ __all__ = [
     "event_router",
     "logging",
     "recording",
-    "time_sync",
 ]
