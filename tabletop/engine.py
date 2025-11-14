@@ -556,8 +556,11 @@ def hand_category_label(a: int, b: int) -> str:
 
 @dataclass
 class SessionCsvLogger:
+    # Include event identifiers to ensure downstream processing can merge with
+    # Cloud exports solely via event_id, independent of row order.
     HEADER = [
         "Spiel",
+        "Event-ID",
         "Block",
         "Bedingung",
         "Runde",
@@ -611,6 +614,7 @@ class SessionCsvLogger:
         timestamp_iso: str,
         round_index_override: Optional[int] = None,
         scores: Optional[Dict[VP, int]] = None,
+        event_id: Optional[str] = None,
     ) -> None:
         is_reveal = actor == "SYS" and action == "reveal_and_score"
         if actor == "SYS" and not is_reveal:
@@ -643,6 +647,7 @@ class SessionCsvLogger:
 
         row = [
             session_value,
+            event_id or "",
             cfg.block,
             cfg.condition,
             round_idx + 1,
@@ -756,6 +761,7 @@ class GameEngine:
             data["t_utc_iso"],
             round_index_override=round_idx,
             scores=self._score_snapshot(),
+            event_id=data.get("event_id"),
         )
 
     def _cards_of(self, player: Player) -> Tuple[int, int]:

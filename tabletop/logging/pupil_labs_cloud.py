@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -26,9 +26,14 @@ class PupilLabsCloudLogger:
         self.api_key = api_key
         self.timeout = timeout_s
         self.max_retries = max_retries
+        self._backoff_min = 0.5
+        self._backoff_max = 30.0
 
     def send(self, event: Dict[str, Any]) -> None:
         """Send *event* to the Pupil Labs Cloud ingest endpoint with retries."""
+
+        # This loop intentionally retries forever – reliability beats latency and
+        # no event is ever discarded once handed to the cloud bridge.
 
         payload: Dict[str, Any] = dict(event or {})
 
@@ -38,8 +43,11 @@ class PupilLabsCloudLogger:
             "Content-Type": "application/json",
         }
 
-        delay = 0.1
-        for attempt in range(self.max_retries + 1):
+        delay = self._backoff_min
+        attempt = 0
+        event_id = _extract_event_id(payload)
+        while True:
+            attempt += 1
             try:
                 response = self.sess.post(
                     url,
@@ -50,30 +58,36 @@ class PupilLabsCloudLogger:
                 status = response.status_code
                 if 200 <= status < 300:
                     if self._log.isEnabledFor(logging.DEBUG):
-                        self._log.debug("Pupil Labs Cloud ingest success: %s", status)
+                        self._log.debug(
+                            "Pupil Labs Cloud ingest success: %s event_id=%s",
+                            status,
+                            event_id,
+                        )
                     return
-                if 500 <= status < 600:
-                    raise RuntimeError(f"server responded with {status}")
+                body_preview = response.text[:200]
                 self._log.warning(
-                    "Pupil Labs Cloud ingest non-success status: %s %s",
+                    "Pupil Labs Cloud ingest status=%s attempt=%s event_id=%s body=%s",
                     status,
-                    response.text[:200],
+                    attempt,
+                    event_id,
+                    body_preview,
                 )
-                return
             except Exception as exc:  # pragma: no cover - network safety
-                if attempt >= self.max_retries:
-                    self._log.error(
-                        "Pupil Labs Cloud ingest failed after %s attempts: %r",
-                        attempt + 1,
-                        exc,
-                    )
-                    return
-                if self._log.isEnabledFor(logging.DEBUG):
-                    self._log.debug(
-                        "Pupil Labs Cloud ingest attempt %s failed: %r",
-                        attempt + 1,
-                        exc,
-                    )
-                time.sleep(delay)
-                delay = min(delay * 2, 1.0)
+                self._log.exception(
+                    "Pupil Labs Cloud ingest error attempt=%s event_id=%s: %r",
+                    attempt,
+                    event_id,
+                    exc,
+                )
+            time.sleep(delay)
+            delay = min(delay * 2.0, self._backoff_max)
+
+
+def _extract_event_id(payload: Dict[str, Any]) -> Optional[str]:
+    properties = payload.get("properties")
+    if isinstance(properties, dict) and properties.get("event_id"):
+        return str(properties["event_id"])
+    if payload.get("event_id"):
+        return str(payload["event_id"])
+    return None
 

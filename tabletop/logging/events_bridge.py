@@ -19,6 +19,7 @@ ALLOWED_KEYS = {
     "session",
     "block",
     "player",
+    "event_id",
     "button",
     "phase",
     "round_index",
@@ -31,7 +32,17 @@ ALLOWED_KEYS = {
 
 
 def _filter_for_cloud(event: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in event.items() if k in ALLOWED_KEYS}
+    filtered = {k: v for k, v in event.items() if k in ALLOWED_KEYS}
+    event_id = filtered.get("event_id")
+    properties = {k: v for k, v in filtered.items() if k != "event_id"}
+    if event_id is not None:
+        properties["event_id"] = event_id
+    # Cloud-side analytics join exclusively on event_id to avoid positional drift.
+    return {
+        "event_id": event_id,
+        "properties": properties,
+        **{k: v for k, v in filtered.items() if k != "event_id"},
+    }
 
 
 def init_client(
@@ -69,7 +80,7 @@ def push_async(event: Dict[str, Any]) -> None:
     """Enqueue *event* for asynchronous delivery to the Pupil Labs Cloud."""
 
     if _client is None:
-        _log.debug("Pupil Labs Cloud client not initialized; dropping event")
+        _log.warning("Pupil Labs Cloud client not initialized; cannot forward event")
         return
 
     payload = dict(event or {})

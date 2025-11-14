@@ -105,8 +105,11 @@ def _ensure_round_writer() -> queue.Queue[Tuple[Path, List[Dict[str, Any]], List
         return queue_obj
 
 
+# The round CSV carries the originating event_id so downstream analysis can
+# reconcile entries with Pupil Labs Cloud exports purely by identifier.
 ROUND_LOG_HEADER: List[str] = [
     "Session",
+    "Event-ID",
     "Bedingung",
     "Block",
     "Runde im Block",
@@ -241,6 +244,7 @@ def write_round_log(app: Any, actor: str, action: str, payload: Dict[str, Any], 
 
     row = {
         "Session": app.session_id or "",
+        "Event-ID": payload.get("event_id", ""),
         "Bedingung": block_condition,
         "Block": block_number,
         "Runde im Block": round_in_block,
