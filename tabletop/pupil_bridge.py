@@ -22,8 +22,6 @@ import metrics
 from core.device_registry import DeviceRegistry
 from core.event_router import EventRouter, TimestampPolicy, UIEvent, policy_for
 from core.recording import DeviceClient, RecordingController, RecordingHttpError
-from core.time_sync import AsyncSimpleDeviceWrapper, OfficialTimeSync, make_timesync
-from core.clock import now_ns
 
 from core.http_client import get_sync_session
 
@@ -320,13 +318,9 @@ class PupilBridge:
         self._event_batch_window = event_batch_window_override(0.005)
         self._last_queue_log = 0.0
         self._last_send_log = 0.0
-        self._offset_anomaly_warned: set[str] = set()
+        self._clock_offset_ns: Dict[str, int] = {}
         self.ready = threading.Event()
         self._device_registry = DeviceRegistry()
-        self._time_sync: Dict[str, OfficialTimeSync] = {}
-        self._time_sync_tasks: Dict[str, asyncio.Future[Optional[object]]] = {}
-        self.time_sync: Optional[OfficialTimeSync] = None
-        self.time_offset_ms: Dict[str, float] = {}
         self._recording_controllers: Dict[str, RecordingController] = {}
         self._active_router_player: Optional[str] = None
         self._player_device_key: Dict[str, str] = {}
@@ -684,51 +678,29 @@ class PupilBridge:
         if self._active_router_player is None:
             self._event_router.set_active_player(player)
             self._active_router_player = player
-        self._setup_time_sync(player, device_key, device)
+        self._init_clock_offset(player, device_key, device)
         self._recording_controllers[player] = self._build_recording_controller(
             player, device, cfg
         )
         self._probe_capabilities(player, device, device_key)
 
-    def _setup_time_sync(self, player: str, device_key: str, device: Any) -> None:
-        async_device = AsyncSimpleDeviceWrapper(device)
+    def _init_clock_offset(self, player: str, device_key: str, device: Any) -> None:
+        """Estimate the clock offset for a device using the simple API."""
 
-        calibrator = make_timesync(
-            async_device,
-            device_key,
-            min_samples=10,
-            max_samples=40,
-            rtt_ms_max=120.0,
-            offset_ms_abs_max=250.0,
-        )
-        self.time_sync = calibrator
-        self._time_sync[device_key] = calibrator
-        self.time_offset_ms.setdefault(device_key, 0.0)
+        try:
+            estimate = device.estimate_time_offset()
+        except Exception:
+            log.warning("Failed to estimate clock offset for %s", player, exc_info=True)
+            self._clock_offset_ns[device_key] = 0
+            return
 
-        async def _calibrate() -> Optional[object]:
-            try:
-                result = await calibrator.calibrate()
-            except Exception as exc:
-                log.warning("TimeSync calibration failed for %s: %s", device_key, exc)
-                return None
-            self.time_offset_ms[device_key] = result.median_offset_ms
-            log.info(
-                "TimeSync OK %s: median=%.2f ms, iqr=%.2f ms, rms_rtt=%.2f ms, accepted=%d/%d",
-                device_key,
-                result.median_offset_ms,
-                result.iqr_ms,
-                result.rms_rtt_ms,
-                result.accepted,
-                result.total,
-            )
-            return result
+        try:
+            offset_ms = float(estimate.time_offset_ms.mean)
+        except AttributeError:
+            offset_ms = float(estimate.time_offset_ms)
 
-        future = asyncio.run_coroutine_threadsafe(_calibrate(), self._async_loop)
-        self._time_sync_tasks[device_key] = future
-
-    def _schedule_periodic_resync(self, player: str) -> None:
-        # Deaktiviert: kein periodischer Re-Sync mehr
-        return
+        clock_offset_ns = round(offset_ms * 1_000_000.0)
+        self._clock_offset_ns[device_key] = int(clock_offset_ns)
 
     def _build_recording_controller(
         self, player: str, device: Any, cfg: NeonDeviceConfig
@@ -1252,14 +1224,6 @@ class PupilBridge:
         """Close all connected devices if necessary."""
 
         self._event_router.flush_all()
-        for future in list(self._time_sync_tasks.values()):
-            future.cancel()
-            try:
-                future.result()
-            except Exception:
-                pass
-        self._time_sync_tasks.clear()
-        self._time_sync.clear()
         if self._async_loop.is_running():
             async def _cancel_all() -> None:
                 for task in asyncio.all_tasks():
@@ -1306,7 +1270,7 @@ class PupilBridge:
         self._player_device_key.clear()
         self._assigned_device_keys.clear()
         self._device_key_usage.clear()
-        self.time_offset_ms.clear()
+        self._clock_offset_ns.clear()
 
     # ------------------------------------------------------------------
     # Recording helpers
@@ -1985,29 +1949,14 @@ class PupilBridge:
         include_timestamp = event.timestamp_policy is TimestampPolicy.CLIENT_CORRECTED
         if include_timestamp:
             device_key = self._player_device_key.get(player)
-            offset_ms = self.time_offset_ms.get(device_key, 0.0) if device_key else 0.0
-            offset_ns = int(offset_ms * 1_000_000.0)
-            if abs(offset_ns) > 5_000_000_000 and player not in self._offset_anomaly_warned:
-                log.warning(
-                    "Large clock offset for %s (offset_ns=%d) – keeping client-side timestamps",
-                    player,
-                    offset_ns,
-                )
-                self._offset_anomaly_warned.add(player)
+            clock_offset_ns = 0
+            if device_key is not None:
+                clock_offset_ns = self._clock_offset_ns.get(device_key, 0)
+
+            host_now_ns = time.time_ns()
+            corrected_ns = host_now_ns - clock_offset_ns
+
             prepared_payload.pop("timestamp_ns", None)
-            corrected_ns: int
-            if device_key and device_key in self._time_sync and device_key in self.time_offset_ms:
-                calibrator = self._time_sync.get(device_key)
-                if calibrator is not None:
-                    self.time_sync = calibrator
-                    device_ts_ns = now_ns() - offset_ns
-                    corrected_ns = self.time_sync.apply_ns(
-                        device_ts_ns, self.time_offset_ms[device_key]
-                    )
-                else:
-                    corrected_ns = now_ns()
-            else:
-                corrected_ns = now_ns()
             prepared_payload["event_timestamp_unix_ns"] = corrected_ns
         else:
             prepared_payload.pop("timestamp_ns", None)
@@ -2204,49 +2153,18 @@ class PupilBridge:
         device_key = self._player_device_key.get(player)
         if not device_key:
             return 0
-        offset_ms = self.time_offset_ms.get(device_key)
-        if offset_ms is None:
-            calibrator = self._time_sync.get(device_key)
-            if calibrator is not None:
-                self.time_sync = calibrator
-        offset_ms = self.time_offset_ms.get(device_key, 0.0)
-        try:
-            return int(offset_ms * 1_000_000.0)
-        except Exception:
-            return 0
+        return int(self._clock_offset_ns.get(device_key, 0))
 
     def estimate_time_offset(self, player: str) -> Optional[float]:
-        """Return device_time - host_time in seconds if available.
-
-        The reconciler consumes the value as an offset in nanoseconds
-        (device_time minus host_time, i.e. positive if the device clock
-        runs ahead of the host).  The realtime API does not document the
-        polarity, so we emit a warning once per player and let the
-        reconciler lock the sign if required.
-        """
+        """Return device_time - host_time in seconds if available."""
 
         device_key = self._player_device_key.get(player)
         if not device_key:
             return None
-        calibrator = self._time_sync.get(device_key)
-        if calibrator is None:
-            device = self._device_by_player.get(player)
-            if device is None:
-                return None
-            self._setup_time_sync(player, device_key, device)
-            calibrator = self._time_sync.get(device_key)
-            if calibrator is None:
-                return None
-        future = self._time_sync_tasks.get(device_key)
-        if future is not None and not future.done():
-            try:
-                future.result(timeout=self._connect_timeout)
-            except Exception:
-                pass
-        offset_ms = self.time_offset_ms.get(device_key)
-        if offset_ms is None:
+        offset_ns = self._clock_offset_ns.get(device_key)
+        if offset_ns is None:
             return None
-        return offset_ms / 1000.0
+        return offset_ns / 1_000_000_000.0
 
     def is_connected(self, player: str) -> bool:
         """Return whether the given player has an associated device."""

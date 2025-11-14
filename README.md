@@ -37,5 +37,6 @@ gibt die gesendeten Payloads in der Konsole aus.
 - `device_id` ist optional – fällt sie weg, nutzt die Bridge automatisch den
   `ip:port`-Endpunkt als Schlüssel und protokolliert den Fallback.
 - Die Zeit-Synchronisation verwendet `estimate_time_offset()` der offiziellen
-  Realtime-API. Abweichungen und Filterentscheidungen werden im Timesync-Log
-  transparent nachverfolgt.
+  Realtime-API. Pro Gerät wird einmalig der Offset `clock_offset_ns =
+  round(estimate.time_offset_ms.mean * 1_000_000)` bestimmt und bei Events als
+  `event_timestamp_unix_ns = time.time_ns() - clock_offset_ns` angewandt.

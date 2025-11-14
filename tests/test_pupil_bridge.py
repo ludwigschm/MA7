@@ -1,8 +1,6 @@
 import json
 import math
-import statistics
 from pathlib import Path
-import asyncio
 from types import SimpleNamespace
 from typing import Iterator, Tuple
 
@@ -46,8 +44,7 @@ class _FakeDevice:
     def wait_for_notification(self, event: str, timeout: float = 0.5) -> object:
         return self._notifications.get(event)
 
-    async def estimate_time_offset(self) -> _FakeEstimate:
-        await asyncio.sleep(0)
+    def estimate_time_offset(self) -> _FakeEstimate:
         value = self.offset_samples_ms[
             self.offset_index % len(self.offset_samples_ms)
         ]
@@ -171,11 +168,11 @@ def test_recording_cancel_clears_state(bridge):
     assert pupil_bridge.is_recording("VP1") is True
 
 
-def test_time_sync_manager_used_for_offsets(bridge):
+def test_estimate_time_offset_returns_cached_value(bridge):
     pupil_bridge, device = bridge
     assert pupil_bridge._player_device_key["VP1"] == "127.0.0.1:8080"
     offset = pupil_bridge.estimate_time_offset("VP1")
-    expected = statistics.median(device.offset_samples_ms) / 1000.0
+    expected = device.offset_samples_ms[0] / 1000.0
     assert offset == pytest.approx(expected)
     # subsequent call should not error even if samples exhausted
     offset2 = pupil_bridge.estimate_time_offset("VP1")

@@ -6,7 +6,6 @@ import sys as _sys
 _core_mod = _import_module("core")
 _sys.modules.setdefault(__name__ + ".core", _core_mod)
 _sys.modules.setdefault(__name__ + ".core.clock", _import_module("core.clock"))
-_sys.modules.setdefault(__name__ + ".core.time_sync", _import_module("core.time_sync"))
 
 core = _core_mod
 
