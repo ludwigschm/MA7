@@ -121,6 +121,7 @@ ROUND_LOG_HEADER: List[str] = [
     "Karte2 VP2",
     "Aktion",
     "Zeit",
+    "event_timestamp_unix_ns",
     "Gewinner",
     "Punktestand VP1",
     "Punktestand VP2",
@@ -174,6 +175,7 @@ def round_log_action_label(app: Any, action: str, payload: Dict[str, Any]) -> st
 def write_round_log(app: Any, actor: str, action: str, payload: Dict[str, Any], player: int) -> None:
     if not getattr(app, "round_log_path", None):
         return
+    payload = dict(payload or {})
     is_showdown = action == "showdown"
     system_actions = {"session_start", "fixation_flash", "fixation_beep"}
     is_system_event = action in system_actions
@@ -242,6 +244,8 @@ def write_round_log(app: Any, actor: str, action: str, payload: Dict[str, Any], 
     def _card_value(val: Any) -> Any:
         return "" if val is None else val
 
+    ts_ns = payload.get("event_timestamp_unix_ns")
+
     row = {
         "Session": app.session_id or "",
         "Event-ID": payload.get("event_id", ""),
@@ -256,6 +260,7 @@ def write_round_log(app: Any, actor: str, action: str, payload: Dict[str, Any], 
         "Karte2 VP2": _card_value(vp2_cards[1]) if vp2_cards else "",
         "Aktion": action_label,
         "Zeit": timestamp,
+        "event_timestamp_unix_ns": ts_ns if ts_ns is not None else "",
         "Gewinner": winner_label,
         "Punktestand VP1": score_vp1,
         "Punktestand VP2": score_vp2,

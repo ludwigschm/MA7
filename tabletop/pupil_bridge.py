@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import queue
 import re
 import threading
@@ -41,6 +42,9 @@ from requests import Response
 _HTTP_SESSION = get_sync_session()
 _JSON_HEADERS = {"Content-Type": "application/json"}
 _REST_START_PAYLOAD = json.dumps({"action": "START"}, separators=(",", ":"))
+
+_CLOCK_OFFSET_MAX_ATTEMPTS = 5
+_CLOCK_OFFSET_RETRY_DELAY_S = 0.5
 
 
 def is_transient(status_code: int) -> bool:
@@ -1885,17 +1889,40 @@ class PupilBridge:
                 offsets[player] = int(self._clock_offset_ns[device_key])
                 continue
 
-            try:
-                estimate = device.estimate_time_offset()
-            except Exception as exc:  # pragma: no cover - hardware dependent
-                raise RuntimeError(
-                    f"Clock-Offset für {player} konnte nicht gemessen werden"
-                ) from exc
-
-            try:
-                offset_ms = float(estimate.time_offset_ms.mean)
-            except AttributeError:
-                offset_ms = float(estimate.time_offset_ms)
+            last_error: Exception | None = None
+            offset_ms: float | None = None
+            for attempt in range(1, _CLOCK_OFFSET_MAX_ATTEMPTS + 1):
+                try:
+                    estimate = device.estimate_time_offset()
+                    try:
+                        raw_offset_ms = estimate.time_offset_ms.mean
+                    except AttributeError:
+                        raw_offset_ms = estimate.time_offset_ms
+                    offset_ms = float(raw_offset_ms)
+                    if not math.isfinite(offset_ms):
+                        raise ValueError(f"Received non-finite offset {offset_ms!r}")
+                    break
+                except Exception as exc:  # pragma: no cover - hardware dependent
+                    last_error = exc
+                    log.warning(
+                        "Clock-Offset-Versuch %s/%s für %s fehlgeschlagen: %s",
+                        attempt,
+                        _CLOCK_OFFSET_MAX_ATTEMPTS,
+                        player,
+                        exc,
+                    )
+                    if attempt < _CLOCK_OFFSET_MAX_ATTEMPTS:
+                        time.sleep(_CLOCK_OFFSET_RETRY_DELAY_S)
+            if offset_ms is None:
+                message = (
+                    "Clock-Offset für {player} konnte nach {attempts} Versuchen nicht "
+                    "gemessen werden (device_key={device_key})."
+                ).format(
+                    player=player,
+                    attempts=_CLOCK_OFFSET_MAX_ATTEMPTS,
+                    device_key=device_key,
+                )
+                raise RuntimeError(message) from last_error
 
             clock_offset_ns = int(round(offset_ms * 1_000_000.0))
             self._clock_offset_ns[device_key] = clock_offset_ns
@@ -1982,14 +2009,35 @@ class PupilBridge:
         payload_json: Optional[str] = None
         prepared_payload: Dict[str, Any] = dict(event.payload or {})
         include_timestamp = event.timestamp_policy is TimestampPolicy.CLIENT_CORRECTED
+        device_key: Optional[str] = None
         if include_timestamp:
             device_key = self._player_device_key.get(player)
             if not device_key or device_key not in self._clock_offset_ns:
-                raise RuntimeError(
-                    "Clock-Offset fehlt – calibrate_time_offset() muss vor dem "
-                    "ersten Event erfolgreich abgeschlossen werden."
+                log.warning(
+                    "Clock-Offset unerwartet fehlend für %s (device_key=%s) – "
+                    "versuche Notfall-Kalibrierung.",
+                    player,
+                    device_key or "<unbekannt>",
                 )
+                try:
+                    self.calibrate_time_offset(players=[player])
+                except Exception as exc:
+                    log.error(
+                        "Notfall-Kalibrierung für %s fehlgeschlagen: %s",
+                        player,
+                        exc,
+                    )
+                device_key = self._player_device_key.get(player)
+                if not device_key or device_key not in self._clock_offset_ns:
+                    log.error(
+                        "Clock-Offset weiterhin fehlend für %s (device_key=%s) – Event "
+                        "wird ohne Timestamp gesendet.",
+                        player,
+                        device_key or "<unbekannt>",
+                    )
+                    include_timestamp = False
 
+        if include_timestamp and device_key is not None:
             clock_offset_ns = self._clock_offset_ns[device_key]
             host_now_ns = time.time_ns()
             companion_time_ns = host_now_ns - clock_offset_ns

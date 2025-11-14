@@ -2028,6 +2028,8 @@ class TabletopRoot(FloatLayout):
             payload_dict = {}
         else:
             payload_dict = {"value": payload}
+        if t_ns is not None and "event_timestamp_unix_ns" not in payload_dict:
+            payload_dict["event_timestamp_unix_ns"] = t_ns
         event_id = event_id or str(uuid.uuid4())
         payload_dict.setdefault("event_id", event_id)
         payload_dict.setdefault("phase", phase)
