@@ -82,10 +82,6 @@ def _decoded_events(device: _FakeDevice) -> Iterator[tuple[str, dict]]:
 def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
     monkeypatch.setattr("tabletop.pupil_bridge._reachable", lambda *_, **__: True)
     monkeypatch.setenv("LOW_LATENCY_DISABLED", "1")
-    monkeypatch.setattr(
-        "core.event_router.get_health",
-        lambda: {"rms_ms": 0.0, "offset_jump_ms_last": 0.0, "is_stable": True},
-    )
     config_path = Path("/tmp/test_neon_devices.txt")
     config_path.write_text("VP1_IP=127.0.0.1\nVP1_PORT=8080\n", encoding="utf-8")
     bridge = PupilBridge(device_mapping={}, config_path=config_path)
@@ -94,6 +90,7 @@ def bridge(monkeypatch: pytest.MonkeyPatch) -> Tuple[PupilBridge, _FakeDevice]:
     bridge._device_by_player["VP1"] = device  # type: ignore[attr-defined]
     device_key = device_key_from(cfg.ip, cfg.port or 0, None)
     bridge._on_device_connected("VP1", device, cfg, device_key)  # type: ignore[attr-defined]
+    bridge.calibrate_time_offset(players=["VP1"])
     bridge.ready.set()
     yield bridge, device
     bridge.close()
@@ -177,3 +174,26 @@ def test_estimate_time_offset_returns_cached_value(bridge):
     # subsequent call should not error even if samples exhausted
     offset2 = pupil_bridge.estimate_time_offset("VP1")
     assert math.isclose(offset2, offset, rel_tol=1e-6)
+
+
+def test_calibrate_time_offset_hard_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BrokenDevice(_FakeDevice):
+        def estimate_time_offset(self) -> _FakeEstimate:  # type: ignore[override]
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("tabletop.pupil_bridge._reachable", lambda *_, **__: True)
+    monkeypatch.setenv("LOW_LATENCY_DISABLED", "1")
+    config_path = Path("/tmp/test_neon_devices_fail.txt")
+    config_path.write_text("VP1_IP=127.0.0.1\nVP1_PORT=8080\n", encoding="utf-8")
+    bridge = PupilBridge(device_mapping={}, config_path=config_path)
+    try:
+        device = _BrokenDevice()
+        cfg = NeonDeviceConfig(player="VP1", ip="127.0.0.1", port=8080)
+        bridge._device_by_player["VP1"] = device  # type: ignore[attr-defined]
+        device_key = device_key_from(cfg.ip, cfg.port or 0, None)
+        bridge._player_device_key["VP1"] = device_key  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError):
+            bridge.calibrate_time_offset(players=["VP1"])
+    finally:
+        bridge.close()
+        config_path.unlink(missing_ok=True)

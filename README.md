@@ -40,3 +40,7 @@ gibt die gesendeten Payloads in der Konsole aus.
   Realtime-API. Pro Gerät wird einmalig der Offset `clock_offset_ns =
   round(estimate.time_offset_ms.mean * 1_000_000)` bestimmt und bei Events als
   `event_timestamp_unix_ns = time.time_ns() - clock_offset_ns` angewandt.
+- Gelingt die Messung nicht, bricht der Startvorgang hart ab – es existiert kein
+  Fallback auf unkalibrierte Laptop-Zeit.
+- Alle älteren Sync-Mechanismen (TimeReconciler, Marker-Refines, Soft-Offsets)
+  wurden entfernt, damit der Ablauf klar und nachvollziehbar bleibt.

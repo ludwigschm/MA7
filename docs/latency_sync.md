@@ -9,15 +9,10 @@
 - Die verbleibenden `fix.*`-Marker folgen unverändert dem High-Priority-Pfad.
 
 ## Clock-Offset
-- Die Bridge nutzt `device.estimate_time_offset()` der offiziellen Realtime-API, um pro Gerät einmalig den Offset zu bestimmen.
-- Der Offset wird als `clock_offset_ns = round(estimate.time_offset_ms.mean * 1_000_000)` gespeichert (Fallback: direkter `time_offset_ms` Wert).
-- Ausgehende Events erhalten `event_timestamp_unix_ns = time.time_ns() - clock_offset_ns`, sofern der Zeitstempel benötigt wird.
-
-## RMS & Confidence
-- Die Mapping-Logs enthalten `rms=…`, `rms_ns=…`, `samples`, `slope_mode`, `offset_sign` und `confidence`.
-- `rms_ns` beschreibt den quadratischen Fehler im Nanosekundenbereich. Sinkende Werte deuten auf eine stabile Verbindung hin.
-- `confidence` wird dynamisch an den RMS gebunden. Werte ≥ `0.8` aktivieren automatische Refines.
-- `offset_sign` bleibt stabil, bis mehrere hochwertige Samples (inkl. Host-Mirror) eine Umkehr unterstützen.
+- Die Bridge nutzt `device.estimate_time_offset()` der offiziellen Realtime-API, um pro Gerät genau einmal den Offset zu bestimmen.
+- Schlägt die Messung fehl (Gerät fehlt, API-Fehler, Timeout), bricht der Startvorgang hart mit einer Exception ab – Experimente laufen nie ohne Offset.
+- Der Offset wird als `clock_offset_ns = round(estimate.time_offset_ms.mean * 1_000_000)` gespeichert und über `event_timestamp_unix_ns = time.time_ns() - clock_offset_ns` auf jedes Event angewandt.
+- Legacy-Komponenten wie TimeReconciler, Marker-Refines oder Soft-Offsets wurden vollständig entfernt, damit der Pfad klar und wartbar bleibt.
 
 ## Batch-Parameter anpassen
 - Standardwerte: Fenster `5 ms`, Batch-Größe `4`.

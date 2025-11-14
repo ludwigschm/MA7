@@ -319,6 +319,8 @@ class PupilBridge:
         self._last_queue_log = 0.0
         self._last_send_log = 0.0
         self._clock_offset_ns: Dict[str, int] = {}
+        # Clock offsets are determined exactly once via :meth:`calibrate_time_offset`.
+        self._measured_device_keys: set[str] = set()
         self.ready = threading.Event()
         self._device_registry = DeviceRegistry()
         self._recording_controllers: Dict[str, RecordingController] = {}
@@ -678,29 +680,10 @@ class PupilBridge:
         if self._active_router_player is None:
             self._event_router.set_active_player(player)
             self._active_router_player = player
-        self._init_clock_offset(player, device_key, device)
         self._recording_controllers[player] = self._build_recording_controller(
             player, device, cfg
         )
         self._probe_capabilities(player, device, device_key)
-
-    def _init_clock_offset(self, player: str, device_key: str, device: Any) -> None:
-        """Estimate the clock offset for a device using the simple API."""
-
-        try:
-            estimate = device.estimate_time_offset()
-        except Exception:
-            log.warning("Failed to estimate clock offset for %s", player, exc_info=True)
-            self._clock_offset_ns[device_key] = 0
-            return
-
-        try:
-            offset_ms = float(estimate.time_offset_ms.mean)
-        except AttributeError:
-            offset_ms = float(estimate.time_offset_ms)
-
-        clock_offset_ns = round(offset_ms * 1_000_000.0)
-        self._clock_offset_ns[device_key] = int(clock_offset_ns)
 
     def _build_recording_controller(
         self, player: str, device: Any, cfg: NeonDeviceConfig
@@ -1271,6 +1254,7 @@ class PupilBridge:
         self._assigned_device_keys.clear()
         self._device_key_usage.clear()
         self._clock_offset_ns.clear()
+        self._measured_device_keys.clear()
 
     # ------------------------------------------------------------------
     # Recording helpers
@@ -1869,6 +1853,57 @@ class PupilBridge:
             if device is not None
         ]
 
+    def calibrate_time_offset(
+        self, *, players: Optional[Iterable[str]] = None
+    ) -> dict[str, int]:
+        """Measure the host-companion clock offset exactly once.
+
+        This method is intentionally strict: it is expected to run a single time
+        at experiment start. Any failure aborts the experiment immediately to
+        avoid running with an unknown offset.
+        """
+
+        selected = list(players) if players is not None else self.connected_players()
+        if not selected:
+            raise RuntimeError(
+                "Keine verbundenen Geräte für die Clock-Offset-Messung gefunden."
+            )
+
+        offsets: dict[str, int] = {}
+        for player in selected:
+            device = self._device_by_player.get(player)
+            if device is None:
+                raise RuntimeError(
+                    f"Gerät für {player} ist nicht verbunden – Offset-Messung unmöglich."
+                )
+            device_key = self._player_device_key.get(player)
+            if not device_key:
+                raise RuntimeError(
+                    f"Kein device_key für {player} vorhanden – bitte Verbindung prüfen."
+                )
+            if device_key in self._measured_device_keys:
+                offsets[player] = int(self._clock_offset_ns[device_key])
+                continue
+
+            try:
+                estimate = device.estimate_time_offset()
+            except Exception as exc:  # pragma: no cover - hardware dependent
+                raise RuntimeError(
+                    f"Clock-Offset für {player} konnte nicht gemessen werden"
+                ) from exc
+
+            try:
+                offset_ms = float(estimate.time_offset_ms.mean)
+            except AttributeError:
+                offset_ms = float(estimate.time_offset_ms)
+
+            clock_offset_ns = int(round(offset_ms * 1_000_000.0))
+            self._clock_offset_ns[device_key] = clock_offset_ns
+            self._measured_device_keys.add(device_key)
+            offsets[player] = clock_offset_ns
+
+        return offsets
+
     # ------------------------------------------------------------------
     # Event helpers
     def _event_sender_loop(self) -> None:
@@ -1949,15 +1984,18 @@ class PupilBridge:
         include_timestamp = event.timestamp_policy is TimestampPolicy.CLIENT_CORRECTED
         if include_timestamp:
             device_key = self._player_device_key.get(player)
-            clock_offset_ns = 0
-            if device_key is not None:
-                clock_offset_ns = self._clock_offset_ns.get(device_key, 0)
+            if not device_key or device_key not in self._clock_offset_ns:
+                raise RuntimeError(
+                    "Clock-Offset fehlt – calibrate_time_offset() muss vor dem "
+                    "ersten Event erfolgreich abgeschlossen werden."
+                )
 
+            clock_offset_ns = self._clock_offset_ns[device_key]
             host_now_ns = time.time_ns()
-            corrected_ns = host_now_ns - clock_offset_ns
+            companion_time_ns = host_now_ns - clock_offset_ns
 
             prepared_payload.pop("timestamp_ns", None)
-            prepared_payload["event_timestamp_unix_ns"] = corrected_ns
+            prepared_payload["event_timestamp_unix_ns"] = companion_time_ns
         else:
             prepared_payload.pop("timestamp_ns", None)
             prepared_payload.pop("event_timestamp_unix_ns", None)
@@ -2152,19 +2190,24 @@ class PupilBridge:
     # ------------------------------------------------------------------
     def get_device_offset_ns(self, player: str) -> int:
         device_key = self._player_device_key.get(player)
-        if not device_key:
-            return 0
-        return int(self._clock_offset_ns.get(device_key, 0))
+        if not device_key or device_key not in self._clock_offset_ns:
+            raise RuntimeError(
+                "Clock-Offset wurde noch nicht bestimmt – calibrate_time_offset() "
+                "muss vor dem Start ausgeführt werden."
+            )
+        return int(self._clock_offset_ns[device_key])
 
     def estimate_time_offset(self, player: str) -> Optional[float]:
-        """Return device_time - host_time in seconds if available."""
+        """Return device_time - host_time in seconds based on the stored offset."""
 
         device_key = self._player_device_key.get(player)
-        if not device_key:
-            return None
-        offset_ns = self._clock_offset_ns.get(device_key)
-        if offset_ns is None:
-            return None
+        if not device_key or device_key not in self._clock_offset_ns:
+            raise RuntimeError(
+                "Clock-Offset für {player} liegt nicht vor – Messung fehlt.".format(
+                    player=player
+                )
+            )
+        offset_ns = self._clock_offset_ns[device_key]
         return offset_ns / 1_000_000_000.0
 
     def is_connected(self, player: str) -> bool:

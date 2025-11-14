@@ -45,15 +45,6 @@ _HIGH_PRIORITY_PATTERN = re.compile(
 TimestampPolicy = Enum("TimestampPolicy", ["ARRIVAL", "CLIENT_CORRECTED"])
 
 
-CRITICAL_EVENTS: set[str] = {"ui.stim_onset", "ui.stim_offset", "trial.begin", "trial.end"}
-
-
-def get_health() -> dict[str, float | bool]:
-    """Return the current time-sync health metrics."""
-
-    return {"is_stable": True, "rms_ms": 0.0, "offset_jump_ms_last": 0.0}
-
-
 def classify_event(name: str) -> Priority:
     """Classify an event by name into a :class:`Priority`."""
 
@@ -67,9 +58,9 @@ def policy_for(name: str) -> TimestampPolicy:
 
     if name.startswith(("device.", "sensor.")):
         return TimestampPolicy.ARRIVAL
-    health = get_health()
-    if not health.get("is_stable", True) and name not in CRITICAL_EVENTS:
-        return TimestampPolicy.ARRIVAL
+    # With the legacy reconciler removed we always rely on the single measured
+    # companion offset. There is no soft fallback that would re-route traffic to
+    # arrival timestamps.
     return TimestampPolicy.CLIENT_CORRECTED
 
 
