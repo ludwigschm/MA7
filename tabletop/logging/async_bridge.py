@@ -35,7 +35,15 @@ def enqueue(fn: Callable[[], None]) -> None:
 
     if fn is None:
         return
+    # Wait for queue capacity; if pressure persists we run synchronously to keep
+    # the guarantee that no event gets dropped on the floor.
     try:
-        _q.put_nowait(fn)
+        _q.put(fn, timeout=1.0)
     except queue.Full:
-        _log.warning("async queue full; dropping event")
+        _log.warning(
+            "async queue saturated – executing task synchronously to avoid loss"
+        )
+        try:
+            fn()
+        except Exception:  # pragma: no cover - defensive fallback
+            _log.exception("async task failed during synchronous fallback")

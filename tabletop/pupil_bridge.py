@@ -2134,6 +2134,7 @@ class PupilBridge:
             "block",
             "player",
             "recording_id",
+            "event_id",
             "button",
             "phase",
             "round_index",

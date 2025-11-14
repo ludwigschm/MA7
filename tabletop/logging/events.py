@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from tabletop.engine import EventLogger, Phase as EnginePhase
 from core.clock import now_ns
@@ -53,8 +54,13 @@ class Events:
         action = payload.get("action", "unknown")
         data_payload = dict(payload.get("payload", {}))
 
-        if "event_id" in payload and "event_id" not in data_payload:
-            data_payload["event_id"] = payload["event_id"]
+        event_id = payload.get("event_id")
+        if not event_id:
+            nested_id = data_payload.get("event_id")
+            event_id = nested_id if isinstance(nested_id, str) else str(uuid4())
+            payload["event_id"] = event_id
+        if "event_id" not in data_payload:
+            data_payload["event_id"] = event_id
         if "phase" in payload and "phase" not in data_payload:
             data_payload["phase"] = payload["phase"]
         if "player" in payload and payload["player"] is not None:
@@ -70,7 +76,7 @@ class Events:
         if t_utc_iso is None:
             t_utc_iso = datetime.utcnow().isoformat()
 
-        return self._logger.log(
+        record = self._logger.log(
             session_id,
             round_idx,
             engine_phase,
@@ -81,6 +87,8 @@ class Events:
             t_utc_iso=t_utc_iso,
             blocking=effective_blocking,
         )
+        record["event_id"] = event_id
+        return record
 
     def log(
         self,

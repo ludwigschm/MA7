@@ -2046,6 +2046,8 @@ class TabletopRoot(FloatLayout):
             if key in payload_dict:
                 cloud_event[key] = payload_dict[key]
         cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS}
+        # Downstream analytics rely on this event_id – every payload keeps it so
+        # cloud CSVs can be matched by identifier rather than implicit ordering.
         should_forward = phase == "input_received"
         if not should_forward and action in {
             "session_start",
