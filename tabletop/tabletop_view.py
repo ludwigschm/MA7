@@ -167,13 +167,6 @@ class TabletopRoot(FloatLayout):
             return None
         return w
 
-    @property
-    def _current_ab_version(self) -> int:
-        reconciler = self._time_reconciler
-        if reconciler is None:
-            return 0
-        return reconciler.current_mapping_version
-
     def __init__(
         self,
         *,
@@ -257,7 +250,9 @@ class TabletopRoot(FloatLayout):
         self._bridge_state_dirty = True
         self._next_bridge_check = 0.0
         self._bridge_check_interval = 0.3
-        self._time_reconciler: Optional[Any] = None
+        self.time_offset_ns: Optional[int] = None
+        self._time_offset_by_player: Dict[str, int] = {}
+        self._time_offset_calibrated = False
         self._pre_block_sync = _PreBlockSyncGuard()
         self.update_bridge_context(
             bridge=bridge,
@@ -349,7 +344,6 @@ class TabletopRoot(FloatLayout):
 
         self._mark_bridge_dirty()
         self._ensure_bridge_recordings()
-        self._ensure_time_reconciler()
 
     def _bridge_payload_base(self, *, player: Optional[str] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
@@ -501,17 +495,47 @@ class TabletopRoot(FloatLayout):
             return inner
         return None
 
-    def _ensure_time_reconciler(self) -> None:
-        self._time_reconciler = None
-
     def shutdown_sync_services(self) -> None:
-        reconciler = self._time_reconciler
-        if reconciler is not None:
-            try:
-                reconciler.stop()
-            except Exception:
-                log.debug("Stoppen des TimeReconciler fehlgeschlagen", exc_info=True)
-        self._time_reconciler = None
+        """Compatibility hook – legacy sync services were removed on purpose."""
+
+        log.debug(
+            "shutdown_sync_services() ist ein No-Op – alte Reconciler wurden entfernt."
+        )
+
+    def _calibrate_time_offset_once(self) -> None:
+        """Calibrate the companion clock offset exactly once.
+
+        The experiment must not start without a measured offset. Any error
+        bubbles up as a hard failure to keep the run in a known state.
+        """
+
+        if self._time_offset_calibrated:
+            return
+
+        bridge = self._bridge
+        if bridge is None:
+            self.time_offset_ns = None
+            self._time_offset_by_player = {}
+            self._time_offset_calibrated = True
+            return
+
+        players = self._bridge_ready_players()
+        if not players:
+            raise RuntimeError(
+                "Keine verbundenen Pupil Labs Geräte für die Clock-Offset-Messung."
+            )
+
+        try:
+            offsets = bridge.calibrate_time_offset(players=players)
+        except Exception:
+            log.exception("Clock-Offset-Messung fehlgeschlagen – Experiment wird abgebrochen.")
+            raise
+
+        self._time_offset_by_player = dict(offsets)
+        primary = self._bridge_player or next(iter(players))
+        self.time_offset_ns = offsets.get(primary)
+        self._time_offset_calibrated = True
+        log.info("Clock-Offset initialisiert: %s", offsets)
 
     def _emit_pre_block_sync_once(self, upcoming_block: Optional[int]) -> None:
         if not self._bridge:
@@ -675,12 +699,14 @@ class TabletopRoot(FloatLayout):
             for ch in self.session_id
         ) or 'session'
 
-        self.session_configured = True
         self.log_dir.mkdir(parents=True, exist_ok=True)
         db_path = self.log_dir / f'events_{safe_session_id}.sqlite3'
         self.session_storage_id = safe_session_id
         self.logger = self.events_factory(self.session_id, str(db_path))
-        self._ensure_time_reconciler()
+        # Perform the one-time offset calibration before any events are emitted.
+        self._time_offset_calibrated = False
+        self._calibrate_time_offset_once()
+        self.session_configured = True
         init_round_log(self)
         self.update_role_assignments()
 

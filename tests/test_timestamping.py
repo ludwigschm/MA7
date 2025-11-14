@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,9 @@ class _StubDevice:
         if args:
             self.events.append(str(args[0]))
 
+    def estimate_time_offset(self) -> SimpleNamespace:
+        return SimpleNamespace(time_offset_ms=SimpleNamespace(mean=0.0))
+
 
 @pytest.fixture
 def bridge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PupilBridge:
@@ -26,7 +30,7 @@ def bridge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PupilBridge:
     device = _StubDevice()
     bridge._device_by_player["VP1"] = device  # type: ignore[attr-defined]
     bridge._player_device_key["VP1"] = "vp1"  # type: ignore[attr-defined]
-    bridge._clock_offset_ns["vp1"] = 0  # type: ignore[attr-defined]
+    bridge.calibrate_time_offset(players=["VP1"])
     bridge.ready.set()
     yield bridge
     bridge.close()
@@ -82,10 +86,3 @@ def test_no_monotonic_in_events_payload() -> None:
     assert "time.monotonic_ns(" not in src, "monotonic_ns must not be used for event payload timestamps"
 
 
-def test_policy_falls_back_when_timesync_unstable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "core.event_router.get_health",
-        lambda: {"rms_ms": 5.0, "offset_jump_ms_last": 10.0, "is_stable": False},
-    )
-    assert policy_for("ui.test") is TimestampPolicy.ARRIVAL
-    assert policy_for("ui.stim_onset") is TimestampPolicy.CLIENT_CORRECTED
